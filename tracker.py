@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V14_STEAMDB_ART"
+INIT_FLAG = "PROMO_KEYS_V15_FINAL"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -33,7 +33,6 @@ def slugify(text):
 
 
 def clean_game_title(raw_title):
-    """Strips giveaway suffix words so Steam search finds the exact game."""
     title = raw_title
     if " - " in title:
         title = title.split(" - ")[0]
@@ -57,7 +56,6 @@ def clean_game_title(raw_title):
 
 
 def get_steamdb_artwork(raw_title):
-    """Queries Steam's database (used by SteamDB) for the game's official widescreen header banner."""
     game_name = clean_game_title(raw_title)
     print(f"Querying Steam/SteamDB artwork for: '{game_name}' (Original: '{raw_title}')")
 
@@ -75,7 +73,6 @@ def get_steamdb_artwork(raw_title):
                         break
 
                 if app_id:
-                    # Query appdetails for exact hashed header image URL used by SteamDB
                     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
                     d_resp = requests.get(details_url, headers=HEADERS, timeout=8)
                     if d_resp.status_code == 200:
@@ -84,7 +81,6 @@ def get_steamdb_artwork(raw_title):
                         if header_img:
                             return header_img, app_id
 
-                    # Fallback CDN header URL
                     header_url = f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg"
                     return header_url, app_id
     except Exception as e:
@@ -185,7 +181,7 @@ def check_amd_promotions():
             if resp and resp.status == 200:
                 data = json.loads(page.inner_text("body"))
                 topics = data.get("topic_list", {}).get("topics", [])
-                topics.reverse()  # Oldest first
+                topics.reverse()
 
                 for topic in topics:
                     title = topic.get("title", "")
@@ -265,7 +261,7 @@ def check_amd_promotions():
                 ):
                     cleaned_tabs.append(t)
 
-            cleaned_tabs.reverse()  # Oldest/top items processed first
+            cleaned_tabs.reverse()
             print(f"Detected Giveaway Tabs (Reverse Order): {cleaned_tabs}")
 
             for tab_name in cleaned_tabs:
@@ -281,18 +277,31 @@ def check_amd_promotions():
                     page.wait_for_timeout(3500)
 
                     current_text = page.inner_text("body")
-                    key_match = re.search(
-                        r"([\d,]+\s+Keys?\s+Remaining)", current_text, re.I
-                    )
-                    keys_str = (
-                        f"🟢 {key_match.group(1)}"
-                        if key_match
-                        else "🟢 Keys Available"
-                    )
-                    if key_match and key_match.group(1).strip().startswith("0"):
-                        keys_str = "🔴 0 Keys Remaining"
+                    
+                    # Target exact key counter element safely
+                    keys_str = "🟢 Keys Available"
+                    try:
+                        key_elem = page.locator("text=/keys?\\s+(?:remaining|left)/i").first
+                        if key_elem.is_visible():
+                            key_text_raw = key_elem.inner_text().strip()
+                            num_match = re.search(r"([\d,]+)", key_text_raw)
+                            if num_match:
+                                count_val = int(num_match.group(1).replace(",", ""))
+                                if count_val > 0:
+                                    keys_str = f"🟢 {key_text_raw}"
+                                else:
+                                    keys_str = f"🔴 {key_text_raw} (Out of Stock)"
+                        else:
+                            key_match = re.search(r"([\d,]+\s+Keys?\s+Remaining)", current_text, re.I)
+                            if key_match:
+                                val_str = key_match.group(1)
+                                if val_str.strip().startswith("0"):
+                                    keys_str = f"🔴 {val_str}"
+                                else:
+                                    keys_str = f"🟢 {val_str}"
+                    except Exception:
+                        pass
 
-                    # Fetch official SteamDB artwork + Steam App ID link
                     steam_art, app_id = get_steamdb_artwork(tab_name)
 
                     slug = slugify(tab_name)
@@ -317,7 +326,6 @@ def check_amd_promotions():
 
         browser.close()
 
-    # Post collected items to Discord (Oldest at top, latest/early at bottom)
     for item in collected_items:
         send_discord_card(
             title=item["title"],
