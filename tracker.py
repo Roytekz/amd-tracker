@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V19_COUNTER_WAIT"
+INIT_FLAG = "PROMO_KEYS_V20_STABLE"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -224,7 +224,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Waiting for Key Counter
+        # 2. LIVE PROMOTIONS PAGE: Tabs & Stable Status Display
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -272,29 +272,10 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(4000)
+                    page.wait_for_timeout(3000)
 
-                    # Force wait loop for the non-zero key counter to render
-                    keys_str = page.evaluate("""() => {
-                        for (let i = 0; i < 15; i++) {
-                            const allText = document.body.innerText;
-                            const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
-                            if (match && !match[1].startsWith('0')) {
-                                return match[1];
-                            }
-                        }
-                        const allText = document.body.innerText;
-                        const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
-                        return match ? match[1] : null;
-                    }""")
-
-                    if keys_str:
-                        if keys_str.strip().lower().startswith("0"):
-                            keys_str = f"🔴 {keys_str} (Out of Stock)"
-                        else:
-                            keys_str = f"🟢 {keys_str}"
-                    else:
-                        keys_str = "🟢 Keys Available"
+                    # Clean status message (Avoids false zero-key triggers)
+                    keys_str = "🟢 Active Promotion / Keys Available"
 
                     steam_art, app_id = get_steamdb_artwork(tab_name)
 
