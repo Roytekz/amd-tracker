@@ -7,7 +7,7 @@ SITEMAP_URL = "https://www.amdgaming.com/sitemap.xml"
 SEEN_URLS_FILE = "seen_urls.json"
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
-ROLE_ID = "1563847704541405324"
+ROLE_ID = "1563847704541405324"  # Your @AMD Drop Hunter role ID
 
 def load_seen_urls():
     if os.path.exists(SEEN_URLS_FILE):
@@ -47,14 +47,21 @@ def fetch_sitemap_urls():
 
 def send_discord_alert(url):
     payload = {
-        "content": f"<@&{ROLE_ID}> 🚨 **TEST ALERT (Sitemap Connected)!**",
+        "content": f"<@&{ROLE_ID}> 🚨 **NEW AMD GAME KEY DROP DETECTED!**",
         "embeds": [
             {
-                "title": "🎁 Test Sitemap URL Found",
-                "description": f"Testing webhook connectivity with a live sitemap link:\n\n👉 **[Click Here]({url})**",
+                "title": "🎁 Early Sitemap Drop Found",
+                "description": f"A brand new drop link has just been indexed on the backend sitemap!\n\n👉 **[Click Here to Claim Key]({url})**",
                 "color": 16711680,
+                "fields": [
+                    {
+                        "name": "Status",
+                        "value": "`⏳ Early Sitemap Link`",
+                        "inline": True
+                    }
+                ],
                 "footer": {
-                    "text": "AMD Drop Hunter • Test Mode"
+                    "text": "AMD Drop Hunter • Automated Early Tracker"
                 }
             }
         ]
@@ -62,7 +69,7 @@ def send_discord_alert(url):
 
     response = requests.post(WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print(f"Successfully alerted Discord for: {url}")
+        print(f"Successfully alerted for: {url}")
     else:
         print(f"Failed to send webhook: {response.status_code}, {response.text}")
 
@@ -74,14 +81,19 @@ def main():
         print("No URLs retrieved from sitemap.")
         return
 
-    # FORCE TEST: Send the first available URL in the sitemap regardless of keywords
-    test_url = current_urls[0]
-    print(f"Sending test alert for sitemap URL: {test_url}")
-    send_discord_alert(test_url)
-    
-    # Add it to seen urls so it doesn't repeat on next test
-    seen_urls.add(test_url)
-    save_seen_urls(seen_urls)
+    new_drops_found = False
+    for url in current_urls:
+        # Strict filter: Must contain 'promotion' or 'key', and must not have been seen before
+        if url not in seen_urls and ("promotion" in url.lower() or "key" in url.lower()):
+            print(f"New drop discovered: {url}")
+            send_discord_alert(url)
+            seen_urls.add(url)
+            new_drops_found = True
+
+    if new_drops_found:
+        save_seen_urls(seen_urls)
+    else:
+        print("No new promotion/key drops found in this check.")
 
 if __name__ == "__main__":
     main()
