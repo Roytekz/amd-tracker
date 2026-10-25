@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_EXACT_STEAM_ART_V1"
+INIT_FLAG = "PROMO_EXACT_STEAM_ART_V2"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -61,43 +61,44 @@ def clean_game_title(raw_title):
 
 def get_exact_steam_match(raw_title):
     """
-    STRICT CHECK: Only returns a Steam banner and SteamDB ID if the game title 
-    is an EXACT match on Steam. Never guesses or picks random partial matches!
+    Checks manual aliases first for tricky titles, then queries Steam API
+    and grabs the top relevant match so banners load successfully.
     """
-    game_name = clean_game_title(raw_title)
-    norm_target = re.sub(r"[^a-z0-9]", "", game_name.lower())
-    if len(norm_target) < 3:
-        return None, None
+    manual_aliases = {
+        "deadswitch combat": "Deadswitch Combat",
+        "nutmeg": "NUTMEG! A Nostalgic Deckbuilding Football Manager",
+        "a storied life tabitha": "A Storied Life: Tabitha",
+    }
+    
+    clean_key = clean_game_title(raw_title).lower()
+    search_query = manual_aliases.get(clean_key, clean_game_title(raw_title))
 
-    print(f"Querying Steam for exact match of: '{game_name}' (Original: '{raw_title}')")
+    print(f"Querying Steam for artwork of: '{search_query}' (Original: '{raw_title}')")
 
     try:
-        q = urllib.parse.quote(game_name)
+        q = urllib.parse.quote(search_query)
         search_url = f"https://store.steampowered.com/api/storesearch/?term={q}&l=english&cc=US"
         resp = requests.get(search_url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
             items = resp.json().get("items", [])
-            for item in items:
-                item_norm = re.sub(r"[^a-z0-9]", "", item.get("name", "").lower())
-                # Must be an exact normalized title match
-                if item_norm == norm_target:
-                    app_id = item.get("id")
-                    print(f"Found exact Steam match! App ID: {app_id} for '{item.get('name')}'")
-                    details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
-                    d_resp = requests.get(details_url, headers=HEADERS, timeout=8)
-                    if d_resp.status_code == 200:
-                        app_data = d_resp.json().get(str(app_id), {}).get("data", {})
-                        header_img = app_data.get("header_image")
-                        if header_img:
-                            return header_img, app_id
-                    return (
-                        f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg",
-                        app_id,
-                    )
+            if items:
+                app_id = items[0].get("id")
+                print(f"Found Steam match! App ID: {app_id} for '{items[0].get('name')}'")
+                details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
+                d_resp = requests.get(details_url, headers=HEADERS, timeout=8)
+                if d_resp.status_code == 200:
+                    app_data = d_resp.json().get(str(app_id), {}).get("data", {})
+                    header_img = app_data.get("header_image")
+                    if header_img:
+                        return header_img, app_id
+                return (
+                    f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg",
+                    app_id,
+                )
     except Exception as e:
-        print(f"Steam exact lookup error: {e}")
+        print(f"Steam lookup error for '{raw_title}': {e}")
 
-    print(f"No exact Steam match found for '{game_name}'. Skipping banner.")
+    print(f"No Steam match found for '{search_query}'.")
     return None, None
 
 
