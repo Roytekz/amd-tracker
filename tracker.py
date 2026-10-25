@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_EXACT_STEAM_ART_V2"
+INIT_FLAG = "PROMO_ACCURATE_KEYS_V1"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -60,10 +60,6 @@ def clean_game_title(raw_title):
 
 
 def get_exact_steam_match(raw_title):
-    """
-    Checks manual aliases first for tricky titles, then queries Steam API
-    and grabs the top relevant match so banners load successfully.
-    """
     manual_aliases = {
         "deadswitch combat": "Deadswitch Combat",
         "nutmeg": "NUTMEG! A Nostalgic Deckbuilding Football Manager",
@@ -73,8 +69,6 @@ def get_exact_steam_match(raw_title):
     clean_key = clean_game_title(raw_title).lower()
     search_query = manual_aliases.get(clean_key, clean_game_title(raw_title))
 
-    print(f"Querying Steam for artwork of: '{search_query}' (Original: '{raw_title}')")
-
     try:
         q = urllib.parse.quote(search_query)
         search_url = f"https://store.steampowered.com/api/storesearch/?term={q}&l=english&cc=US"
@@ -83,7 +77,6 @@ def get_exact_steam_match(raw_title):
             items = resp.json().get("items", [])
             if items:
                 app_id = items[0].get("id")
-                print(f"Found Steam match! App ID: {app_id} for '{items[0].get('name')}'")
                 details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
                 d_resp = requests.get(details_url, headers=HEADERS, timeout=8)
                 if d_resp.status_code == 200:
@@ -98,14 +91,10 @@ def get_exact_steam_match(raw_title):
     except Exception as e:
         print(f"Steam lookup error for '{raw_title}': {e}")
 
-    print(f"No Steam match found for '{search_query}'.")
     return None, None
 
 
 def capture_amd_showcase_artwork(page):
-    """
-    Finds the exact promotional artwork displayed inside AMD's giveaway showcase area.
-    """
     img_info = page.evaluate(
         """() => {
         const badKeywords = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'svg', 'header', 'footer'];
@@ -170,7 +159,7 @@ def send_discord_card(
         print("CRITICAL ERROR: DISCORD_WEBHOOK secret is empty or missing!")
         return
 
-    is_empty = "0 keys" in keys_text.lower()
+    is_empty = "0 keys" in keys_text.lower() or "out of stock" in keys_text.lower()
     color = 9807270 if is_empty else 15548997
 
     steamdb_line = (
@@ -252,7 +241,7 @@ def check_amd_promotions():
         page = context.new_page()
 
         # ---------------------------------------------------------
-        # 1. Check Sitemap XML for Explicit Giveaway URLs (Early Drops)
+        # 1. Sitemap XML (Early Drops)
         # ---------------------------------------------------------
         try:
             resp = page.goto(
@@ -269,9 +258,7 @@ def check_amd_promotions():
                 )
                 for promo_url in set(early_urls):
                     if promo_url not in seen:
-                        name = (
-                            promo_url.split("/")[-1].replace("-", " ").title()
-                        )
+                        name = promo_url.split("/")[-1].replace("-", " ").title()
                         steam_art, app_id = get_exact_steam_match(name)
                         collected_items.append({
                             "title": name,
@@ -288,7 +275,7 @@ def check_amd_promotions():
             print(f"Sitemap Error: {e}")
 
         # ---------------------------------------------------------
-        # 2. Check Live Promotions Page Tabs
+        # 2. Live Promotions Page Tabs & Precise Key Counter
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -335,19 +322,33 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(3000)
 
-                    current_text = page.inner_text("body")
-                    key_match = re.search(
-                        r"([\d,]+\s+Keys?\s+Remaining)", current_text, re.I
-                    )
-                    keys_str = (
-                        f"🟢 {key_match.group(1)}"
-                        if key_match
-                        else "🟢 Keys Available"
-                    )
-                    if key_match and key_match.group(1).strip().startswith("0"):
-                        keys_str = "🔴 0 Keys Remaining"
+                    # Precise JS counter scanner that specifically looks for active number badges or remaining keywords
+                    keys_str = page.evaluate("""() => {
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                        let node;
+                        while (node = walker.nextNode()) {
+                            const text = node.nodeValue.trim();
+                            if (/\\d[\\d,]*\\s+Keys?\\s+(?:Remaining|Left)/i.test(text)) {
+                                return text;
+                            }
+                        }
+                        // Fallback check for general out-of-stock messages
+                        const fullBody = document.body.innerText;
+                        if (/out of keys|all keys claimed|ended/i.test(fullBody)) {
+                            return "0 Keys Remaining (Out of Stock)";
+                        }
+                        return "Keys Available";
+                    }""")
+
+                    if keys_str and "Keys" in keys_str:
+                        if keys_str.strip().lower().startswith("0") or "out of stock" in keys_str.lower():
+                            keys_str = f"🔴 {keys_str}"
+                        else:
+                            keys_str = f"🟢 {keys_str}"
+                    else:
+                        keys_str = "🟢 Keys Available"
 
                     amd_img_url, amd_shot_bytes = capture_amd_showcase_artwork(page)
                     steam_art, app_id = get_exact_steam_match(tab_name)
