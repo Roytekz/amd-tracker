@@ -2,14 +2,13 @@ import json
 import os
 import re
 import time
-import urllib.parse
 from playwright.sync_api import sync_playwright
 import requests
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V10_EARLY_CATCH"
+INIT_FLAG = "PROMO_KEYS_V12_REVERSE_SORT"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -33,55 +32,35 @@ def slugify(text):
 
 
 def capture_amd_showcase_artwork(page):
-    """Captures the exact banner image displayed inside AMD's giveaway showcase area."""
-    img_info = page.evaluate(
-        """() => {
-        const badKeywords = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'svg', 'header', 'footer'];
-        const isLogo = (str) => badKeywords.some(w => (str || '').toLowerCase().includes(w));
-
-        let candidates = [];
-        for (const img of document.querySelectorAll('img')) {
-            const rect = img.getBoundingClientRect();
-            const src = img.currentSrc || img.src || '';
-            const alt = img.alt || '';
-            if (
-                rect.top > 250 &&
-                rect.width >= 260 &&
-                rect.height >= 130 &&
-                rect.width / rect.height < 3.2 &&
-                !isLogo(src) &&
-                !isLogo(alt)
-            ) {
-                candidates.push({
-                    src: src.startsWith('http') ? src : null,
-                    x: rect.x,
-                    y: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                    area: rect.width * rect.height
-                });
+    """Bulletproof artwork finder: grabs the best image URL or takes a clean crop screenshot."""
+    try:
+        img_url = page.evaluate("""() => {
+            const bad = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'svg', 'header', 'footer', 'profile'];
+            const imgs = Array.from(document.querySelectorAll('img'));
+            let best = null;
+            let maxArea = 0;
+            for (const img of imgs) {
+                const src = img.currentSrc || img.src || '';
+                const lower = src.toLowerCase();
+                if (!src.startsWith('http') || bad.some(b => lower.includes(b))) continue;
+                const rect = img.getBoundingClientRect();
+                const area = rect.width * rect.height;
+                if (area > maxArea && rect.top > 200 && rect.width > 200) {
+                    maxArea = area;
+                    best = src;
+                }
             }
-        }
-        candidates.sort((a, b) => b.area - a.area);
-        return candidates.length > 0 ? candidates[0] : null;
-    }"""
-    )
+            return best;
+        }""")
 
-    if img_info:
-        try:
-            clip_box = {
-                "x": max(0, img_info["x"]),
-                "y": max(0, img_info["y"]),
-                "width": img_info["width"],
-                "height": img_info["height"],
-            }
-            shot = page.screenshot(clip=clip_box)
-            return img_info.get("src"), shot
-        except Exception:
-            if img_info.get("src"):
-                return img_info["src"], None
+        if img_url:
+            return img_url, None
 
-    return None, None
+        shot = page.screenshot(clip={"x": 200, "y": 280, "width": 1100, "height": 600})
+        return None, shot
+    except Exception as e:
+        print(f"Artwork capture error: {e}")
+        return None, None
 
 
 def send_discord_card(
@@ -169,8 +148,10 @@ def check_amd_promotions():
         )
         page = context.new_page()
 
+        collected_items = []
+
         # ---------------------------------------------------------
-        # 1. EARLY DETECTION: Monitor Forum JSON API for Hidden/Early Drop Announcements
+        # 1. EARLY DETECTION: Monitor Forum JSON API
         # ---------------------------------------------------------
         try:
             print("Checking AMD Forum API for early drops...")
@@ -180,6 +161,10 @@ def check_amd_promotions():
             if resp and resp.status == 200:
                 data = json.loads(page.inner_text("body"))
                 topics = data.get("topic_list", {}).get("topics", [])
+                
+                # REVERSE SORT: Process older forum topics first so they appear at the top
+                topics.reverse()
+
                 for topic in topics:
                     title = topic.get("title", "")
                     slug = topic.get("slug", "")
@@ -187,7 +172,6 @@ def check_amd_promotions():
                     img_url = topic.get("image_url")
                     closed = topic.get("closed", False)
 
-                    # Look for giveaway, key, drop, sweepstakes keywords
                     if any(
                         k in title.lower()
                         for k in [
@@ -207,17 +191,16 @@ def check_amd_promotions():
                         status = "🔴 Closed" if closed else "🟢 Early Forum Drop"
 
                         if track_key not in seen:
-                            send_discord_card(
-                                title=title,
-                                url=topic_url,
-                                keys_text=status,
-                                image_url=img_url,
-                                source="AMD Forum API (Early Detection)",
-                                ping=(not first_run and not closed),
-                            )
-                            seen.add(track_key)
-                            updated = True
-                            cards_sent += 1
+                            collected_items.append({
+                                "title": title,
+                                "url": topic_url,
+                                "keys": status,
+                                "img": img_url,
+                                "shot": None,
+                                "source": "AMD Forum API (Early Detection)",
+                                "track_key": track_key,
+                                "ping": (not first_run and not closed)
+                            })
         except Exception as e:
             print(f"Forum API check error: {e}")
 
@@ -257,7 +240,9 @@ def check_amd_promotions():
                 ):
                     cleaned_tabs.append(t)
 
-            print(f"Detected Giveaway Tabs: {cleaned_tabs}")
+            # REVERSE SORT: Process sidebar tabs from bottom to top so older/higher up items hit Discord first
+            cleaned_tabs.reverse()
+            print(f"Detected Giveaway Tabs (Reverse Order): {cleaned_tabs}")
 
             for tab_name in cleaned_tabs:
                 try:
@@ -269,7 +254,7 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(3000)
 
                     current_text = page.inner_text("body")
                     key_match = re.search(
@@ -291,18 +276,16 @@ def check_amd_promotions():
                     track_key = f"TAB::{slug}"
 
                     if track_key not in seen or first_run or is_manual:
-                        send_discord_card(
-                            title=tab_name,
-                            url="https://www.amdgaming.com/promotions",
-                            keys_text=keys_str,
-                            image_url=amd_img_url,
-                            screenshot_bytes=amd_shot_bytes,
-                            source="AMD Promotions Live Page",
-                            ping=(track_key not in seen and not first_run),
-                        )
-                        seen.add(track_key)
-                        updated = True
-                        cards_sent += 1
+                        collected_items.append({
+                            "title": tab_name,
+                            "url": "https://www.amdgaming.com/promotions",
+                            "keys": keys_str,
+                            "img": amd_img_url,
+                            "shot": amd_shot_bytes,
+                            "source": "AMD Promotions Live Page",
+                            "track_key": track_key,
+                            "ping": (track_key not in seen and not first_run)
+                        })
                 except Exception as tab_e:
                     print(f"Tab error for {tab_name}: {tab_e}")
 
@@ -310,6 +293,21 @@ def check_amd_promotions():
             print(f"Promotions scan error: {e}")
 
         browser.close()
+
+    # Dispatch collected items to Discord in reverse order (Oldest / Top -> Latest / Bottom)
+    for item in collected_items:
+        send_discord_card(
+            title=item["title"],
+            url=item["url"],
+            keys_text=item["keys"],
+            image_url=item["img"],
+            screenshot_bytes=item["shot"],
+            source=item["source"],
+            ping=item["ping"],
+        )
+        seen.add(item["track_key"])
+        updated = True
+        cards_sent += 1
 
     if first_run and cards_sent > 0:
         seen.add(INIT_FLAG)
