@@ -8,7 +8,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V12_REVERSE_SORT"
+INIT_FLAG = "PROMO_KEYS_V13_FIXED_ART_KEYS"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -29,38 +29,6 @@ def save_seen(seen_set):
 
 def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-
-
-def capture_amd_showcase_artwork(page):
-    """Bulletproof artwork finder: grabs the best image URL or takes a clean crop screenshot."""
-    try:
-        img_url = page.evaluate("""() => {
-            const bad = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'svg', 'header', 'footer', 'profile'];
-            const imgs = Array.from(document.querySelectorAll('img'));
-            let best = null;
-            let maxArea = 0;
-            for (const img of imgs) {
-                const src = img.currentSrc || img.src || '';
-                const lower = src.toLowerCase();
-                if (!src.startsWith('http') || bad.some(b => lower.includes(b))) continue;
-                const rect = img.getBoundingClientRect();
-                const area = rect.width * rect.height;
-                if (area > maxArea && rect.top > 200 && rect.width > 200) {
-                    maxArea = area;
-                    best = src;
-                }
-            }
-            return best;
-        }""")
-
-        if img_url:
-            return img_url, None
-
-        shot = page.screenshot(clip={"x": 200, "y": 280, "width": 1100, "height": 600})
-        return None, shot
-    except Exception as e:
-        print(f"Artwork capture error: {e}")
-        return None, None
 
 
 def send_discord_card(
@@ -151,7 +119,7 @@ def check_amd_promotions():
         collected_items = []
 
         # ---------------------------------------------------------
-        # 1. EARLY DETECTION: Monitor Forum JSON API
+        # 1. EARLY DETECTION: Forum JSON API
         # ---------------------------------------------------------
         try:
             print("Checking AMD Forum API for early drops...")
@@ -161,9 +129,7 @@ def check_amd_promotions():
             if resp and resp.status == 200:
                 data = json.loads(page.inner_text("body"))
                 topics = data.get("topic_list", {}).get("topics", [])
-                
-                # REVERSE SORT: Process older forum topics first so they appear at the top
-                topics.reverse()
+                topics.reverse()  # Oldest first
 
                 for topic in topics:
                     title = topic.get("title", "")
@@ -205,7 +171,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Remaining Keys
+        # 2. LIVE PROMOTIONS PAGE: Tabs, Keys & Artwork
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -214,7 +180,7 @@ def check_amd_promotions():
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            page.wait_for_timeout(7000)
+            page.wait_for_timeout(6000)
 
             body_text = page.inner_text("body")
             lines = [
@@ -240,12 +206,12 @@ def check_amd_promotions():
                 ):
                     cleaned_tabs.append(t)
 
-            # REVERSE SORT: Process sidebar tabs from bottom to top so older/higher up items hit Discord first
-            cleaned_tabs.reverse()
+            cleaned_tabs.reverse()  # Oldest/top items processed first
             print(f"Detected Giveaway Tabs (Reverse Order): {cleaned_tabs}")
 
             for tab_name in cleaned_tabs:
                 try:
+                    # Click tab via JS
                     page.evaluate(
                         """(targetText) => {
                             const els = Array.from(document.querySelectorAll('*'));
@@ -254,7 +220,7 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(3500)  # Wait for tab content to render
 
                     current_text = page.inner_text("body")
                     key_match = re.search(
@@ -268,9 +234,31 @@ def check_amd_promotions():
                     if key_match and key_match.group(1).strip().startswith("0"):
                         keys_str = "🔴 0 Keys Remaining"
 
-                    amd_img_url, amd_shot_bytes = capture_amd_showcase_artwork(
-                        page
-                    )
+                    # Capture exact banner image or screenshot of showcase box
+                    amd_img_url = page.evaluate("""() => {
+                        const bad = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'svg', 'header', 'footer', 'profile'];
+                        const imgs = Array.from(document.querySelectorAll('img'));
+                        let best = null;
+                        let maxArea = 0;
+                        for (const img of imgs) {
+                            const src = img.currentSrc || img.src || '';
+                            const lower = src.toLowerCase();
+                            if (!src.startsWith('http') || bad.some(b => lower.includes(b))) continue;
+                            const rect = img.getBoundingClientRect();
+                            const area = rect.width * rect.height;
+                            if (area > maxArea && rect.top > 200 && rect.width > 200) {
+                                maxArea = area;
+                                best = src;
+                            }
+                        }
+                        return best;
+                    }""")
+
+                    shot_bytes = None
+                    if not amd_img_url:
+                        shot_bytes = page.screenshot(
+                            clip={"x": 200, "y": 280, "width": 1100, "height": 600}
+                        )
 
                     slug = slugify(tab_name)
                     track_key = f"TAB::{slug}"
@@ -281,7 +269,7 @@ def check_amd_promotions():
                             "url": "https://www.amdgaming.com/promotions",
                             "keys": keys_str,
                             "img": amd_img_url,
-                            "shot": amd_shot_bytes,
+                            "shot": shot_bytes,
                             "source": "AMD Promotions Live Page",
                             "track_key": track_key,
                             "ping": (track_key not in seen and not first_run)
@@ -294,7 +282,7 @@ def check_amd_promotions():
 
         browser.close()
 
-    # Dispatch collected items to Discord in reverse order (Oldest / Top -> Latest / Bottom)
+    # Post collected items to Discord (Oldest/top at the top, latest/early at the bottom)
     for item in collected_items:
         send_discord_card(
             title=item["title"],
