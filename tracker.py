@@ -2,13 +2,14 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from playwright.sync_api import sync_playwright
 import requests
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V6_ARTWORK"
+INIT_FLAG = "PROMO_KEYS_V7_STEAM_ART"
 
 
 def load_seen():
@@ -27,12 +28,68 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
+def clean_game_title(raw_title):
+    """Strips giveaway suffix words so Steam search finds the exact game."""
+    title = raw_title
+    # If there is a hyphen separator like "World of Warships - Naval Supplies Giveaway", take the first part
+    if " - " in title:
+        title = title.split(" - ")[0]
+
+    # Remove common giveaway terms from the end of the title
+    patterns = [
+        r"\bnaval supplies\b.*$",
+        r"\bbonus code\b.*$",
+        r"\bgame key\b.*$",
+        r"\bkey giveaway\b.*$",
+        r"\bgiveaway\b.*$",
+        r"\bsweepstakes\b.*$",
+        r"\bpack\b.*$",
+        r"\bbundle\b.*$",
+        r"\bcode\b.*$",
+        r"\bdlc\b.*$",
+    ]
+    for pat in patterns:
+        title = re.sub(pat, "", title, flags=re.I).strip()
+
+    return title.strip(" -:!|") or raw_title
+
+
+def get_steam_artwork(raw_title):
+    """Queries Steam's official database (used by SteamDB) for the game's high-res header banner."""
+    game_name = clean_game_title(raw_title)
+    print(f"Searching Steam database for artwork: '{game_name}' (from '{raw_title}')")
+
+    try:
+        query = urllib.parse.quote(game_name)
+        url = f"https://store.steampowered.com/api/storesearch/?term={query}&l=english&cc=US"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            items = resp.json().get("items", [])
+            if items:
+                # Pick exact name match if available, otherwise take top search result
+                app_id = items[0].get("id")
+                for item in items:
+                    if item.get("name", "").lower() == game_name.lower():
+                        app_id = item.get("id")
+                        break
+
+                if app_id:
+                    # Official SteamDB / Steam widescreen header banner URL
+                    header_url = f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg"
+                    print(f"Found Steam AppID {app_id} -> {header_url}")
+                    return header_url, app_id
+    except Exception as e:
+        print(f"Steam artwork lookup failed for '{game_name}': {e}")
+
+    return None, None
+
+
 def send_discord_card(
     title,
     url,
     keys_text,
     image_url=None,
-    screenshot_bytes=None,
+    steam_app_id=None,
     source="Promotions Page",
     ping=False,
 ):
@@ -43,16 +100,26 @@ def send_discord_card(
     is_empty = "0 keys" in keys_text.lower()
     color = 9807270 if is_empty else 15548997
 
+    steamdb_line = (
+        f"📊 **[View on SteamDB](https://steamdb.info/app/{steam_app_id}/)**\n"
+        if steam_app_id
+        else ""
+    )
+
     embed = {
         "title": f"🎮 {title}",
         "url": url,
         "description": (
             f"🔑 **Key Status:** `{keys_text}`\n"
-            f"👉 **[CLICK HERE TO CLAIM KEY]({url})**\n\n"
+            f"👉 **[CLICK HERE TO CLAIM KEY]({url})**\n"
+            f"{steamdb_line}\n"
             f"📡 *Detected via: **{source}***"
         ),
         "color": color,
     }
+
+    if image_url and str(image_url).startswith("http"):
+        embed["image"] = {"url": image_url}
 
     payload = {
         "username": "AMD Key Drop Tracker",
@@ -64,78 +131,17 @@ def send_discord_card(
         )
 
     try:
-        # Priority 1: Direct high-res game artwork URL (if valid and not an AMD logo)
-        if image_url and str(image_url).startswith("http"):
-            embed["image"] = {"url": image_url}
-            r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
-        # Priority 2: Direct cropped screenshot of the promotion banner
-        elif screenshot_bytes:
-            embed["image"] = {"url": "attachment://promo_artwork.png"}
-            files = {
-                "file": ("promo_artwork.png", screenshot_bytes, "image/png")
-            }
-            r = requests.post(
-                WEBHOOK_URL,
-                data={"payload_json": json.dumps(payload)},
-                files=files,
-                timeout=20,
-            )
-        else:
-            r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
-
+        r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
         print(f"Discord Webhook Response for '{title}': HTTP {r.status_code}")
         time.sleep(1.5)
     except Exception as e:
         print(f"Webhook delivery failed: {e}")
 
 
-def extract_accurate_artwork(page):
-    """Finds the actual game promo banner on screen, skipping the top AMD Ryzen/Radeon logo."""
-    return page.evaluate(
-        """() => {
-        const badWords = ['logo', 'ryzen', 'radeon', 'avatar', 'icon', 'header', 'footer', 'brand', 'nav', '.svg'];
-        const isBadUrl = (u) => {
-            if (!u || !u.startsWith('http')) return true;
-            const lower = u.toLowerCase();
-            return badWords.some(w => lower.includes(w));
-        };
-
-        let candidates = [];
-
-        // 1. Check all visible <img> elements below the top navigation bar
-        for (const img of document.querySelectorAll('img')) {
-            const rect = img.getBoundingClientRect();
-            const src = img.currentSrc || img.src || '';
-            if (rect.top > 180 && rect.width >= 240 && rect.height >= 120 && !isBadUrl(src)) {
-                candidates.push({ url: src, area: rect.width * rect.height });
-            }
-        }
-
-        // 2. Check all elements with CSS background-image in the showcase area
-        for (const el of document.querySelectorAll('*')) {
-            const rect = el.getBoundingClientRect();
-            if (rect.top > 180 && rect.width >= 240 && rect.height >= 120) {
-                const bg = window.getComputedStyle(el).backgroundImage;
-                if (bg && bg.includes('url(')) {
-                    const match = bg.match(/url\\(["']?(https?:\\/\\/[^"')]+)["']?\\)/);
-                    if (match && !isBadUrl(match[1])) {
-                        candidates.push({ url: match[1], area: rect.width * rect.height });
-                    }
-                }
-            }
-        }
-
-        // Pick the largest artwork banner in the main content area
-        candidates.sort((a, b) => b.area - a.area);
-        return candidates.length > 0 ? candidates[0].url : null;
-    }"""
-    )
-
-
 def check_amd_promotions():
     seen = load_seen()
     is_manual = EVENT_NAME == "workflow_dispatch"
-    first_v6_run = INIT_FLAG not in seen
+    first_v7_run = INIT_FLAG not in seen
     updated = False
     cards_sent = 0
 
@@ -177,12 +183,15 @@ def check_amd_promotions():
                         name = (
                             promo_url.split("/")[-1].replace("-", " ").title()
                         )
+                        art_url, app_id = get_steam_artwork(name)
                         send_discord_card(
                             title=name,
                             url=promo_url,
                             keys_text="⏳ Early Sitemap Link",
+                            image_url=art_url,
+                            steam_app_id=app_id,
                             source="Sitemap XML (Early Detection)",
-                            ping=not first_v6_run,
+                            ping=not first_v7_run,
                         )
                         seen.add(promo_url)
                         updated = True
@@ -191,7 +200,7 @@ def check_amd_promotions():
             print(f"Sitemap Error: {e}")
 
         # ---------------------------------------------------------
-        # 2. Check Live Promotions Page Tabs, Keys & Game Artwork
+        # 2. Check Live Promotions Page Tabs & Remaining Keys
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -217,7 +226,6 @@ def check_amd_promotions():
                 ):
                     sidebar_tabs.append(line)
 
-            # Remove duplicate titles where one just has an exclamation mark on the right panel
             cleaned_tabs = []
             for t in sidebar_tabs:
                 norm = re.sub(r"[^a-z0-9]", "", t.lower())
@@ -231,7 +239,6 @@ def check_amd_promotions():
 
             for tab_name in cleaned_tabs:
                 try:
-                    # Click the tab in the left sidebar
                     page.evaluate(
                         """(targetText) => {
                             const els = Array.from(document.querySelectorAll('*'));
@@ -240,7 +247,7 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(2500)  # Let the new game image and key count load
+                    page.wait_for_timeout(2500)
 
                     current_text = page.inner_text("body")
                     key_match = re.search(
@@ -254,28 +261,21 @@ def check_amd_promotions():
                     if key_match and key_match.group(1).strip().startswith("0"):
                         keys_str = "🔴 0 Keys Remaining"
 
-                    # Grab the accurate game artwork URL
-                    img_url = extract_accurate_artwork(page)
-
-                    # Fallback: If no clean URL found, take a cropped screenshot of the showcase area
-                    shot_bytes = None
-                    if not img_url:
-                        shot_bytes = page.screenshot(
-                            clip={"x": 420, "y": 380, "width": 1080, "height": 520}
-                        )
+                    # Fetch official Steam/SteamDB artwork + SteamDB link
+                    art_url, app_id = get_steam_artwork(tab_name)
 
                     slug = slugify(tab_name)
                     track_key = f"TAB::{slug}"
 
-                    if track_key not in seen or first_v6_run or is_manual:
+                    if track_key not in seen or first_v7_run or is_manual:
                         send_discord_card(
                             title=tab_name,
                             url="https://www.amdgaming.com/promotions",
                             keys_text=keys_str,
-                            image_url=img_url,
-                            screenshot_bytes=shot_bytes,
+                            image_url=art_url,
+                            steam_app_id=app_id,
                             source="AMD Promotions Live Page",
-                            ping=(track_key not in seen and not first_v6_run),
+                            ping=(track_key not in seen and not first_v7_run),
                         )
                         seen.add(track_key)
                         updated = True
@@ -288,7 +288,7 @@ def check_amd_promotions():
 
         browser.close()
 
-    if first_v6_run and cards_sent > 0:
+    if first_v7_run and cards_sent > 0:
         seen.add(INIT_FLAG)
         updated = True
 
