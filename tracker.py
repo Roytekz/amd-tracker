@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V17_FINAL"
+INIT_FLAG = "PROMO_KEYS_V18_EXACT_COUNT_FIX"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -102,7 +102,7 @@ def send_discord_card(
         print("CRITICAL ERROR: DISCORD_WEBHOOK secret is empty or missing!")
         return
 
-    is_empty = "0 keys" in keys_text.lower()
+    is_empty = "0 keys" in keys_text.lower() or "out of stock" in keys_text.lower()
     color = 9807270 if is_empty else 15548997
 
     steamdb_line = (
@@ -224,7 +224,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Precise Key Counter
+        # 2. LIVE PROMOTIONS PAGE: Tabs & Robust Key Counter Parser
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -274,20 +274,25 @@ def check_amd_promotions():
                     )
                     page.wait_for_timeout(4000)
 
-                    # Direct JavaScript DOM parser to extract the exact remaining key count text
+                    # Robust JS key counter extractor looking for numbers next to "Keys"
                     keys_str = page.evaluate("""() => {
-                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-                        while (walker.nextNode()) {
-                            const txt = walker.currentNode.nodeValue.trim();
-                            if (/keys?\\s+remaining/i.test(txt) || /keys?\\s+left/i.test(txt)) {
-                                return txt;
+                        const allText = document.body.innerText;
+                        const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
+                        if (match) return match[1];
+                        
+                        // Fallback search across all small elements/spans
+                        const elements = document.querySelectorAll('div, span, p, b');
+                        for (const el of elements) {
+                            if (/keys?\\s+(?:remaining|left)/i.test(el.innerText)) {
+                                const m = el.innerText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
+                                if (m) return m[1];
                             }
                         }
                         return null;
                     }""")
 
                     if keys_str:
-                        if keys_str.lower().startswith("0"):
+                        if keys_str.strip().lower().startswith("0"):
                             keys_str = f"🔴 {keys_str} (Out of Stock)"
                         else:
                             keys_str = f"🟢 {keys_str}"
