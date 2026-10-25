@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V16_EXACT_COUNTER"
+INIT_FLAG = "PROMO_KEYS_V17_FINAL"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -190,17 +190,15 @@ def check_amd_promotions():
                     fallback_img = topic.get("image_url")
                     closed = topic.get("closed", False)
 
-                    if any(
-                        k in title.lower()
-                        for k: [
-                            "giveaway",
-                            "key",
-                            "drop",
-                            "sweepstakes",
-                            "free",
-                            "claim",
-                        ]
-                    ):
+                    keywords = [
+                        "giveaway",
+                        "key",
+                        "drop",
+                        "sweepstakes",
+                        "free",
+                        "claim",
+                    ]
+                    if any(k in title.lower() for k in keywords):
                         if "historical" in title.lower() or "winner" in title.lower():
                             continue
 
@@ -274,7 +272,7 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(4000)  # Extra pause for DOM key counter to render
+                    page.wait_for_timeout(4000)
 
                     # Direct JavaScript DOM parser to extract the exact remaining key count text
                     keys_str = page.evaluate("""() => {
