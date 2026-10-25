@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_PURE_EARLY_AND_LIVE_V1"
+INIT_FLAG = "PROMO_STRICT_CURRENT_V1"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -108,7 +108,7 @@ def send_discord_card(
     )
 
     status_label = (
-        "⚡ **Status:** `Early / Unannounced Drop Detected!`"
+        "⚡ **Status:** `Early / Unannounced Drop (Not yet public)`"
         if is_early
         else "🟢 **Status:** `Active Live Giveaway`"
     )
@@ -128,7 +128,7 @@ def send_discord_card(
     if image_url and str(image_url).startswith("http"):
         embed["image"] = {"url": image_url}
 
-    tag_name = "EARLY DROP" if is_early else "NEW LIVE DROP"
+    tag_name = "EARLY UPCOMING DROP"
     payload = {
         "username": "AMD Early Drop Monitor",
         "embeds": [embed],
@@ -168,14 +168,13 @@ def check_amd_promotions():
         page = context.new_page()
 
         # ---------------------------------------------------------
-        # 1. TRUE EARLY DETECTION: Check Sitemap XML for newly created unlisted URLs
+        # 1. EARLY DETECTION: Sitemap XML for unlisted upcoming links
         # ---------------------------------------------------------
         try:
             print("Checking Sitemap XML for early unlisted promotion links...")
             resp = page.goto("https://www.amdgaming.com/sitemap.xml", timeout=20000)
             if resp and resp.status == 200:
                 xml_text = page.content()
-                # Find any promotion URLs created on the server
                 early_urls = re.findall(
                     r"https://www\.amdgaming\.com/promotions/[a-zA-Z0-9-_]+",
                     xml_text,
@@ -200,7 +199,7 @@ def check_amd_promotions():
             print(f"Sitemap Error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Currently active tabs only
+        # 2. LIVE PROMOTIONS PAGE: Strictly target current sidebar buttons/tabs
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -209,35 +208,27 @@ def check_amd_promotions():
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
 
-            body_text = page.inner_text("body")
-            lines = [
-                line.strip() for line in body_text.split("\n") if line.strip()
-            ]
-            sidebar_tabs = []
-            for line in lines:
-                if (
-                    re.search(r"Giveaway!?$", line, re.I)
-                    and 8 < len(line) < 75
-                    and "featured giveaway" not in line.lower()
-                    and "exclusive giveaways" not in line.lower()
-                    and line not in sidebar_tabs
-                ):
-                    sidebar_tabs.append(line)
+            # Use strict JavaScript selector to pull ONLY clickable interactive sidebar tabs or promo cards
+            active_tabs = page.evaluate("""() => {
+                const results = [];
+                // Target active navigation buttons or promotional items specifically
+                const items = document.querySelectorAll('button, a[href*="promotions"], .promo-nav-item, [role="tab"]');
+                items.forEach(el => {
+                    const text = el.innerText.trim();
+                    if (text && text.length > 5 && text.length < 60 && /giveaway/i.test(text)) {
+                        if (!text.toLowerCase().includes('featured') && !text.toLowerCase().includes('exclusive')) {
+                            results.push(text);
+                        }
+                    }
+                });
+                return [...new Set(results)];
+            }""")
 
-            cleaned_tabs = []
-            for t in sidebar_tabs:
-                norm = re.sub(r"[^a-z0-9]", "", t.lower())
-                if not any(
-                    re.sub(r"[^a-z0-9]", "", existing.lower()) == norm
-                    for existing in cleaned_tabs
-                ):
-                    cleaned_tabs.append(t)
+            print(f"Strictly Detected Active Giveaway Tabs: {active_tabs}")
 
-            print(f"Detected Live Giveaway Tabs: {cleaned_tabs}")
-
-            for tab_name in cleaned_tabs:
+            for tab_name in active_tabs:
                 try:
                     steam_art, app_id = get_steamdb_artwork(tab_name)
                     slug = slugify(tab_name)
