@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V18_EXACT_COUNT_FIX"
+INIT_FLAG = "PROMO_KEYS_V19_COUNTER_WAIT"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -224,7 +224,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Robust Key Counter Parser
+        # 2. LIVE PROMOTIONS PAGE: Tabs & Waiting for Key Counter
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -274,21 +274,18 @@ def check_amd_promotions():
                     )
                     page.wait_for_timeout(4000)
 
-                    # Robust JS key counter extractor looking for numbers next to "Keys"
+                    # Force wait loop for the non-zero key counter to render
                     keys_str = page.evaluate("""() => {
-                        const allText = document.body.innerText;
-                        const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
-                        if (match) return match[1];
-                        
-                        // Fallback search across all small elements/spans
-                        const elements = document.querySelectorAll('div, span, p, b');
-                        for (const el of elements) {
-                            if (/keys?\\s+(?:remaining|left)/i.test(el.innerText)) {
-                                const m = el.innerText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
-                                if (m) return m[1];
+                        for (let i = 0; i < 15; i++) {
+                            const allText = document.body.innerText;
+                            const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
+                            if (match && !match[1].startsWith('0')) {
+                                return match[1];
                             }
                         }
-                        return null;
+                        const allText = document.body.innerText;
+                        const match = allText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
+                        return match ? match[1] : null;
                     }""")
 
                     if keys_str:
