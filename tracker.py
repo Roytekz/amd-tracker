@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V15_FINAL"
+INIT_FLAG = "PROMO_KEYS_V16_EXACT_COUNTER"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -192,7 +192,7 @@ def check_amd_promotions():
 
                     if any(
                         k in title.lower()
-                        for k in [
+                        for k: [
                             "giveaway",
                             "key",
                             "drop",
@@ -226,7 +226,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Remaining Keys
+        # 2. LIVE PROMOTIONS PAGE: Tabs & Precise Key Counter
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -274,33 +274,27 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(3500)
+                    page.wait_for_timeout(4000)  # Extra pause for DOM key counter to render
 
-                    current_text = page.inner_text("body")
-                    
-                    # Target exact key counter element safely
-                    keys_str = "🟢 Keys Available"
-                    try:
-                        key_elem = page.locator("text=/keys?\\s+(?:remaining|left)/i").first
-                        if key_elem.is_visible():
-                            key_text_raw = key_elem.inner_text().strip()
-                            num_match = re.search(r"([\d,]+)", key_text_raw)
-                            if num_match:
-                                count_val = int(num_match.group(1).replace(",", ""))
-                                if count_val > 0:
-                                    keys_str = f"🟢 {key_text_raw}"
-                                else:
-                                    keys_str = f"🔴 {key_text_raw} (Out of Stock)"
+                    # Direct JavaScript DOM parser to extract the exact remaining key count text
+                    keys_str = page.evaluate("""() => {
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                        while (walker.nextNode()) {
+                            const txt = walker.currentNode.nodeValue.trim();
+                            if (/keys?\\s+remaining/i.test(txt) || /keys?\\s+left/i.test(txt)) {
+                                return txt;
+                            }
+                        }
+                        return null;
+                    }""")
+
+                    if keys_str:
+                        if keys_str.lower().startswith("0"):
+                            keys_str = f"🔴 {keys_str} (Out of Stock)"
                         else:
-                            key_match = re.search(r"([\d,]+\s+Keys?\s+Remaining)", current_text, re.I)
-                            if key_match:
-                                val_str = key_match.group(1)
-                                if val_str.strip().startswith("0"):
-                                    keys_str = f"🔴 {val_str}"
-                                else:
-                                    keys_str = f"🟢 {val_str}"
-                    except Exception:
-                        pass
+                            keys_str = f"🟢 {keys_str}"
+                    else:
+                        keys_str = "🟢 Keys Available"
 
                     steam_art, app_id = get_steamdb_artwork(tab_name)
 
