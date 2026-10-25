@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V23_REVERSE_SORT"
+INIT_FLAG = "PROMO_EXACT_STEAM_ART_V1"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -61,12 +61,15 @@ def clean_game_title(raw_title):
 
 def get_exact_steam_match(raw_title):
     """
-    ONLY returns a Steam banner and SteamDB ID if the game title is an EXACT match on Steam.
+    STRICT CHECK: Only returns a Steam banner and SteamDB ID if the game title 
+    is an EXACT match on Steam. Never guesses or picks random partial matches!
     """
     game_name = clean_game_title(raw_title)
     norm_target = re.sub(r"[^a-z0-9]", "", game_name.lower())
     if len(norm_target) < 3:
         return None, None
+
+    print(f"Querying Steam for exact match of: '{game_name}' (Original: '{raw_title}')")
 
     try:
         q = urllib.parse.quote(game_name)
@@ -76,8 +79,10 @@ def get_exact_steam_match(raw_title):
             items = resp.json().get("items", [])
             for item in items:
                 item_norm = re.sub(r"[^a-z0-9]", "", item.get("name", "").lower())
+                # Must be an exact normalized title match
                 if item_norm == norm_target:
                     app_id = item.get("id")
+                    print(f"Found exact Steam match! App ID: {app_id} for '{item.get('name')}'")
                     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
                     d_resp = requests.get(details_url, headers=HEADERS, timeout=8)
                     if d_resp.status_code == 200:
@@ -92,6 +97,7 @@ def get_exact_steam_match(raw_title):
     except Exception as e:
         print(f"Steam exact lookup error: {e}")
 
+    print(f"No exact Steam match found for '{game_name}'. Skipping banner.")
     return None, None
 
 
@@ -220,7 +226,7 @@ def send_discord_card(
 def check_amd_promotions():
     seen = load_seen()
     is_manual = EVENT_NAME == "workflow_dispatch"
-    first_v9_run = INIT_FLAG not in seen
+    first_run = INIT_FLAG not in seen
     updated = False
     cards_sent = 0
 
@@ -274,7 +280,7 @@ def check_amd_promotions():
                             "screenshot_bytes": None,
                             "steam_app_id": app_id,
                             "source": "Sitemap XML (Early Detection)",
-                            "ping": not first_v9_run,
+                            "ping": not first_run,
                             "track_key": promo_url
                         })
         except Exception as e:
@@ -348,7 +354,7 @@ def check_amd_promotions():
                     slug = slugify(tab_name)
                     track_key = f"TAB::{slug}"
 
-                    if track_key not in seen or first_v9_run or is_manual:
+                    if track_key not in seen or first_run or is_manual:
                         collected_items.append({
                             "title": tab_name,
                             "url": "https://www.amdgaming.com/promotions",
@@ -357,7 +363,7 @@ def check_amd_promotions():
                             "screenshot_bytes": amd_shot_bytes,
                             "steam_app_id": app_id,
                             "source": "AMD Promotions Live Page",
-                            "ping": (track_key not in seen and not first_v9_run),
+                            "ping": (track_key not in seen and not first_run),
                             "track_key": track_key
                         })
                 except Exception as tab_e:
@@ -368,8 +374,7 @@ def check_amd_promotions():
 
         browser.close()
 
-    # REVERSE SORT: Process items so older/current items hit Discord first (at the top),
-    # and brand-new incoming items hit Discord last (at the bottom).
+    # Reverse sort: older/current items post first (at top), brand-new items post last (at bottom)
     collected_items.reverse()
 
     for item in collected_items:
@@ -387,7 +392,7 @@ def check_amd_promotions():
         updated = True
         cards_sent += 1
 
-    if first_v9_run and cards_sent > 0:
+    if first_run and cards_sent > 0:
         seen.add(INIT_FLAG)
         updated = True
 
