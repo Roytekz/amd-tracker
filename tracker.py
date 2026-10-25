@@ -40,7 +40,6 @@ def fetch_sitemap_urls():
                 if loc.tag.endswith('loc') and loc.text:
                     urls.append(loc.text.strip())
                     
-        print(f"Successfully fetched {len(urls)} total URLs from sitemap.")
         return urls
     except Exception as e:
         print(f"Error fetching sitemap: {e}")
@@ -48,21 +47,14 @@ def fetch_sitemap_urls():
 
 def send_discord_alert(url):
     payload = {
-        "content": f"<@&{ROLE_ID}> 🚨 **NEW AMD GAME KEY DROP DETECTED!**",
+        "content": f"<@&{ROLE_ID}> 🚨 **TEST ALERT (Sitemap Connected)!**",
         "embeds": [
             {
-                "title": "🎁 Early Sitemap Drop Found",
-                "description": f"A brand new drop link has just been indexed on the backend sitemap!\n\n👉 **[Click Here to Claim Key]({url})**",
+                "title": "🎁 Test Sitemap URL Found",
+                "description": f"Testing webhook connectivity with a live sitemap link:\n\n👉 **[Click Here]({url})**",
                 "color": 16711680,
-                "fields": [
-                    {
-                        "name": "Status",
-                        "value": "`⏳ Early Sitemap Link`",
-                        "inline": True
-                    }
-                ],
                 "footer": {
-                    "text": "AMD Drop Hunter • Automated Early Tracker"
+                    "text": "AMD Drop Hunter • Test Mode"
                 }
             }
         ]
@@ -82,27 +74,14 @@ def main():
         print("No URLs retrieved from sitemap.")
         return
 
-    new_drops_found = False
-    match_count = 0
-
-    for url in current_urls:
-        # Check for promotion or key keywords
-        if "promotion" in url.lower() or "key" in url.lower():
-            match_count += 1
-            if url not in seen_urls:
-                print(f"New matching drop discovered: {url}")
-                send_discord_alert(url)
-                seen_urls.add(url)
-                new_drops_found = True
-            else:
-                print(f"Already seen matching drop (skipped): {url}")
-
-    print(f"Total matching promotion/key URLs found in sitemap: {match_count}")
-
-    if new_drops_found:
-        save_seen_urls(seen_urls)
-    else:
-        print("No new unseen drops found.")
+    # FORCE TEST: Send the first available URL in the sitemap regardless of keywords
+    test_url = current_urls[0]
+    print(f"Sending test alert for sitemap URL: {test_url}")
+    send_discord_alert(test_url)
+    
+    # Add it to seen urls so it doesn't repeat on next test
+    seen_urls.add(test_url)
+    save_seen_urls(seen_urls)
 
 if __name__ == "__main__":
     main()
