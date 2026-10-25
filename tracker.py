@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import cloudscraper
 import requests
 
@@ -24,22 +25,35 @@ def save_seen(seen_set):
         json.dump(sorted(list(seen_set)), f, indent=2)
 
 
-def notify_discord(title, url, source):
+def notify_discord(title, url, source, image_url=None):
     if not WEBHOOK_URL:
+        print("Error: DISCORD_WEBHOOK secret not found!")
         return
+
+    embed = {
+        "title": f"🚨 {title}",
+        "url": url,
+        "description": (
+            f"👉 **[CLICK HERE TO OPEN PROMOTION]({url})**\n\n"
+            f"📡 *Detected early via: **{source}***"
+        ),
+        "color": 15548997,  # AMD Red
+    }
+
+    if image_url:
+        embed["image"] = {"url": image_url}
+
     payload = {
         "username": "AMD Early Monitor",
-        "content": "@everyone",
-        "embeds": [
-            {
-                "title": f"🚨 {title}",
-                "url": url,
-                "description": f"Detected via **{source}**",
-                "color": 15548997,
-            }
-        ],
+        "content": "@everyone 🔥 **New AMD Drop Detected!**",
+        "embeds": [embed],
     }
-    requests.post(WEBHOOK_URL, json=payload)
+
+    try:
+        requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        time.sleep(1)  # Prevents Discord rate-limiting if multiple links drop at once
+    except Exception as e:
+        print(f"Webhook delivery error: {e}")
 
 
 def check_amd():
@@ -47,8 +61,9 @@ def check_amd():
     is_first_run = len(seen) == 0
     updated = False
 
+    # 1. Check Sitemap & Promotions Page for URLs, Anchor Tags (#), and Gleam Links
     urls_to_check = [
-        ("Sitemap", "https://www.amdgaming.com/sitemap.xml"),
+        ("Sitemap XML", "https://www.amdgaming.com/sitemap.xml"),
         ("Promotions Page", "https://www.amdgaming.com/promotions"),
     ]
 
@@ -56,15 +71,18 @@ def check_amd():
         try:
             resp = scraper.get(target_url, timeout=15)
             if resp.status_code == 200:
-                matches = re.findall(
-                    r"(?:https://www\.amdgaming\.com)?(/promotions/[a-zA-Z0-9-_]+)",
+                # UPGRADE 1: Catches both /promotions/name AND /promotions#name
+                promo_matches = re.findall(
+                    r"(?:https://www\.amdgaming\.com)?(/promotions[/#][a-zA-Z0-9-_]+)",
                     resp.text,
                 )
-                for path in set(matches):
+                for path in set(promo_matches):
                     full_url = f"https://www.amdgaming.com{path}"
                     if full_url not in seen:
                         slug_name = (
-                            path.split("/")[-1].replace("-", " ").title()
+                            re.split(r"[/#]", path)[-1]
+                            .replace("-", " ")
+                            .title()
                         )
                         if not is_first_run:
                             notify_discord(
@@ -74,42 +92,82 @@ def check_amd():
                             )
                         seen.add(full_url)
                         updated = True
+
+                # UPGRADE 2: Catches embedded Gleam.io giveaway links directly
+                gleam_matches = re.findall(
+                    r"https://gleam\.io/[a-zA-Z0-9]{5}/[a-zA-Z0-9-_]+",
+                    resp.text,
+                )
+                for gleam_url in set(gleam_matches):
+                    if gleam_url not in seen:
+                        gleam_name = (
+                            gleam_url.split("/")[-1].replace("-", " ").title()
+                        )
+                        if not is_first_run:
+                            notify_discord(
+                                f"Direct Gleam Giveaway: {gleam_name}",
+                                gleam_url,
+                                f"{source_name} (Gleam Embed)",
+                            )
+                        seen.add(gleam_url)
+                        updated = True
         except Exception as e:
             print(f"[{source_name}] Check failed: {e}")
 
-    try:
-        resp = scraper.get("https://www.amdgaming.com/latest.json", timeout=15)
-        if resp.status_code == 200:
-            topics = resp.json().get("topic_list", {}).get("topics", [])
-            for topic in topics:
-                title = topic.get("title", "")
-                slug = topic.get("slug", "")
-                topic_id = topic.get("id", "")
-                if any(
-                    k in title.lower()
-                    for k in [
-                        "giveaway",
-                        "sweepstakes",
-                        "free",
-                        "drop",
-                        "key",
-                        "promotion",
-                    ]
-                ):
-                    topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
-                    if topic_url not in seen:
-                        if not is_first_run:
-                            notify_discord(title, topic_url, "Forum JSON API")
-                        seen.add(topic_url)
-                        updated = True
-    except Exception as e:
-        print(f"[JSON API] Check failed: {e}")
+    # 2. UPGRADE 3: Check both Latest Forum JSON and Dedicated Sweepstakes Category JSON
+    json_endpoints = [
+        ("Sweepstakes Category API", "https://www.amdgaming.com/c/sweepstakes.json"),
+        ("Latest Forum API", "https://www.amdgaming.com/latest.json"),
+    ]
+
+    keywords = [
+        "giveaway",
+        "sweepstakes",
+        "free",
+        "drop",
+        "key",
+        "promotion",
+        "claim",
+        "bundle",
+        "win",
+    ]
+
+    for api_name, api_url in json_endpoints:
+        try:
+            resp = scraper.get(api_url, timeout=15)
+            if resp.status_code == 200:
+                topics = resp.json().get("topic_list", {}).get("topics", [])
+                for topic in topics:
+                    title = topic.get("title", "")
+                    slug = topic.get("slug", "")
+                    topic_id = topic.get("id", "")
+                    image_url = topic.get("image_url")  # UPGRADE 4: Grabs promo banner image
+
+                    # Every post in Sweepstakes Category OR matching keywords in Latest
+                    is_sweepstakes_feed = "sweepstakes.json" in api_url
+                    has_keyword = any(k in title.lower() for k in keywords)
+
+                    if is_sweepstakes_feed or has_keyword:
+                        # Skip pinned historical winner threads
+                        if "historical sweepstakes" in title.lower():
+                            continue
+
+                        topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
+                        if topic_url not in seen:
+                            if not is_first_run:
+                                notify_discord(
+                                    title, topic_url, api_name, image_url
+                                )
+                            seen.add(topic_url)
+                            updated = True
+        except Exception as e:
+            print(f"[{api_name}] Check failed: {e}")
 
     if is_first_run and updated:
         notify_discord(
-            "Bot Activated & Working!",
+            "Upgraded Bot Activated & Working!",
             "https://www.amdgaming.com/promotions",
-            "First Setup Complete",
+            "System Upgrade Complete",
         )
 
     if updated:
