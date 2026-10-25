@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_EARLY_NOTIFY_V1"
+INIT_FLAG = "PROMO_PURE_EARLY_AND_LIVE_V1"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -95,7 +95,7 @@ def send_discord_card(
     image_url=None,
     steam_app_id=None,
     source="Promotions Page",
-    ping=False,
+    is_early=False,
 ):
     if not WEBHOOK_URL:
         print("CRITICAL ERROR: DISCORD_WEBHOOK secret is empty or missing!")
@@ -107,27 +107,33 @@ def send_discord_card(
         else ""
     )
 
+    status_label = (
+        "⚡ **Status:** `Early / Unannounced Drop Detected!`"
+        if is_early
+        else "🟢 **Status:** `Active Live Giveaway`"
+    )
+
     embed = {
         "title": f"🎮 {title}",
         "url": url,
         "description": (
-            f"🚀 **Status:** `Early Drop Detected / Active Giveaway`\n"
+            f"{status_label}\n"
             f"👉 **[CLICK HERE TO CLAIM]({url})**\n"
             f"{steamdb_line}\n"
             f"📡 *Detected via: **{source}***"
         ),
-        "color": 15548997,
+        "color": 16734296 if is_early else 15548997,
     }
 
     if image_url and str(image_url).startswith("http"):
         embed["image"] = {"url": image_url}
 
+    tag_name = "EARLY DROP" if is_early else "NEW LIVE DROP"
     payload = {
         "username": "AMD Early Drop Monitor",
         "embeds": [embed],
+        "content": f"@everyone 🔥 **{tag_name}: {title}**",
     }
-    if ping:
-        payload["content"] = f"@everyone 🔥 **NEW AMD GAME DROP DETECTED: {title}**"
 
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
@@ -142,7 +148,6 @@ def check_amd_promotions():
     is_manual = EVENT_NAME == "workflow_dispatch"
     first_run = INIT_FLAG not in seen
     updated = False
-    cards_sent = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -162,61 +167,40 @@ def check_amd_promotions():
         )
         page = context.new_page()
 
-        collected_items = []
-
         # ---------------------------------------------------------
-        # 1. EARLY DETECTION: Forum JSON API (Catches new posts instantly)
+        # 1. TRUE EARLY DETECTION: Check Sitemap XML for newly created unlisted URLs
         # ---------------------------------------------------------
         try:
-            print("Checking AMD Forum API for early drops...")
-            resp = page.goto(
-                "https://www.amdgaming.com/latest.json", timeout=20000
-            )
+            print("Checking Sitemap XML for early unlisted promotion links...")
+            resp = page.goto("https://www.amdgaming.com/sitemap.xml", timeout=20000)
             if resp and resp.status == 200:
-                data = json.loads(page.inner_text("body"))
-                topics = data.get("topic_list", {}).get("topics", [])
-                topics.reverse()
-
-                for topic in topics:
-                    title = topic.get("title", "")
-                    slug = topic.get("slug", "")
-                    topic_id = topic.get("id", "")
-                    fallback_img = topic.get("image_url")
-                    closed = topic.get("closed", False)
-
-                    keywords = [
-                        "giveaway",
-                        "key",
-                        "drop",
-                        "sweepstakes",
-                        "free",
-                        "claim",
-                    ]
-                    if any(k in title.lower() for k in keywords):
-                        if "historical" in title.lower() or "winner" in title.lower():
-                            continue
-
-                        topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
-                        track_key = f"FORUM::{topic_id}"
-
-                        steam_art, app_id = get_steamdb_artwork(title)
-                        final_img = steam_art or fallback_img
-
-                        if track_key not in seen:
-                            collected_items.append({
-                                "title": title,
-                                "url": topic_url,
-                                "img": final_img,
-                                "app_id": app_id,
-                                "source": "AMD Forum API (Early Detection)",
-                                "track_key": track_key,
-                                "ping": (not first_run and not closed)
-                            })
+                xml_text = page.content()
+                # Find any promotion URLs created on the server
+                early_urls = re.findall(
+                    r"https://www\.amdgaming\.com/promotions/[a-zA-Z0-9-_]+",
+                    xml_text,
+                )
+                for promo_url in set(early_urls):
+                    if "terms" not in promo_url and promo_url not in seen:
+                        name = promo_url.split("/")[-1].replace("-", " ").title()
+                        steam_art, app_id = get_steamdb_artwork(name)
+                        
+                        if not first_run or is_manual:
+                            send_discord_card(
+                                title=name,
+                                url=promo_url,
+                                image_url=steam_art,
+                                steam_app_id=app_id,
+                                source="Sitemap XML (Early Unannounced Detection)",
+                                is_early=True,
+                            )
+                        seen.add(promo_url)
+                        updated = True
         except Exception as e:
-            print(f"Forum API check error: {e}")
+            print(f"Sitemap Error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Fast Tab & Drop Detection
+        # 2. LIVE PROMOTIONS PAGE: Currently active tabs only
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -251,26 +235,26 @@ def check_amd_promotions():
                 ):
                     cleaned_tabs.append(t)
 
-            cleaned_tabs.reverse()
-            print(f"Detected Giveaway Tabs (Reverse Order): {cleaned_tabs}")
+            print(f"Detected Live Giveaway Tabs: {cleaned_tabs}")
 
             for tab_name in cleaned_tabs:
                 try:
                     steam_art, app_id = get_steamdb_artwork(tab_name)
-
                     slug = slugify(tab_name)
                     track_key = f"TAB::{slug}"
 
-                    if track_key not in seen or first_run or is_manual:
-                        collected_items.append({
-                            "title": tab_name,
-                            "url": "https://www.amdgaming.com/promotions",
-                            "img": steam_art,
-                            "app_id": app_id,
-                            "source": "AMD Promotions Page",
-                            "track_key": track_key,
-                            "ping": (track_key not in seen and not first_run)
-                        })
+                    if track_key not in seen:
+                        if not first_run or is_manual:
+                            send_discord_card(
+                                title=tab_name,
+                                url="https://www.amdgaming.com/promotions",
+                                image_url=steam_art,
+                                steam_app_id=app_id,
+                                source="AMD Promotions Page",
+                                is_early=False,
+                            )
+                        seen.add(track_key)
+                        updated = True
                 except Exception as tab_e:
                     print(f"Tab error for {tab_name}: {tab_e}")
 
@@ -279,20 +263,7 @@ def check_amd_promotions():
 
         browser.close()
 
-    for item in collected_items:
-        send_discord_card(
-            title=item["title"],
-            url=item["url"],
-            image_url=item["img"],
-            steam_app_id=item.get("app_id"),
-            source=item["source"],
-            ping=item["ping"],
-        )
-        seen.add(item["track_key"])
-        updated = True
-        cards_sent += 1
-
-    if first_run and cards_sent > 0:
+    if first_run:
         seen.add(INIT_FLAG)
         updated = True
 
