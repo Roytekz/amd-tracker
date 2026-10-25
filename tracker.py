@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V21_LIVE_COUNTER"
+INIT_FLAG = "PROMO_EARLY_NOTIFY_V1"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -92,7 +92,6 @@ def get_steamdb_artwork(raw_title):
 def send_discord_card(
     title,
     url,
-    keys_text,
     image_url=None,
     steam_app_id=None,
     source="Promotions Page",
@@ -101,9 +100,6 @@ def send_discord_card(
     if not WEBHOOK_URL:
         print("CRITICAL ERROR: DISCORD_WEBHOOK secret is empty or missing!")
         return
-
-    is_empty = "0 keys" in keys_text.lower() or "out of stock" in keys_text.lower()
-    color = 9807270 if is_empty else 15548997
 
     steamdb_line = (
         f"📊 **[View on SteamDB](https://steamdb.info/app/{steam_app_id}/)**\n"
@@ -115,25 +111,23 @@ def send_discord_card(
         "title": f"🎮 {title}",
         "url": url,
         "description": (
-            f"🔑 **Key Status:** `{keys_text}`\n"
+            f"🚀 **Status:** `Early Drop Detected / Active Giveaway`\n"
             f"👉 **[CLICK HERE TO CLAIM]({url})**\n"
             f"{steamdb_line}\n"
             f"📡 *Detected via: **{source}***"
         ),
-        "color": color,
+        "color": 15548997,
     }
 
     if image_url and str(image_url).startswith("http"):
         embed["image"] = {"url": image_url}
 
     payload = {
-        "username": "AMD Key Drop Tracker",
+        "username": "AMD Early Drop Monitor",
         "embeds": [embed],
     }
-    if ping and not is_empty:
-        payload["content"] = (
-            f"@everyone 🚨 **NEW AMD GAME KEY DROP: {title} ({keys_text})**"
-        )
+    if ping:
+        payload["content"] = f"@everyone 🔥 **NEW AMD GAME DROP DETECTED: {title}**"
 
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
@@ -171,7 +165,7 @@ def check_amd_promotions():
         collected_items = []
 
         # ---------------------------------------------------------
-        # 1. EARLY DETECTION: Forum JSON API
+        # 1. EARLY DETECTION: Forum JSON API (Catches new posts instantly)
         # ---------------------------------------------------------
         try:
             print("Checking AMD Forum API for early drops...")
@@ -204,7 +198,6 @@ def check_amd_promotions():
 
                         topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
                         track_key = f"FORUM::{topic_id}"
-                        status = "🔴 Closed" if closed else "🟢 Early Forum Drop"
 
                         steam_art, app_id = get_steamdb_artwork(title)
                         final_img = steam_art or fallback_img
@@ -213,7 +206,6 @@ def check_amd_promotions():
                             collected_items.append({
                                 "title": title,
                                 "url": topic_url,
-                                "keys": status,
                                 "img": final_img,
                                 "app_id": app_id,
                                 "source": "AMD Forum API (Early Detection)",
@@ -224,7 +216,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Live Key Counter Extraction
+        # 2. LIVE PROMOTIONS PAGE: Fast Tab & Drop Detection
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -233,7 +225,7 @@ def check_amd_promotions():
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(5000)
 
             body_text = page.inner_text("body")
             lines = [
@@ -264,48 +256,6 @@ def check_amd_promotions():
 
             for tab_name in cleaned_tabs:
                 try:
-                    page.evaluate(
-                        """(targetText) => {
-                            const els = Array.from(document.querySelectorAll('*'));
-                            const match = els.find(el => el.children.length === 0 && el.textContent.trim() === targetText);
-                            if (match) match.click();
-                        }""",
-                        tab_name,
-                    )
-                    
-                    # LIVE KEY COUNTER EXTRACTOR: Polls the page for up to 8 seconds until the live key number loads
-                    keys_str = page.evaluate("""() => {
-                        return new Promise((resolve) => {
-                            let attempts = 0;
-                            const interval = setInterval(() => {
-                                attempts++;
-                                const bodyText = document.body.innerText;
-                                // Look for pattern like "8791 Keys Remaining" or similar digits near keys
-                                const match = bodyText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
-                                if (match) {
-                                    clearInterval(interval);
-                                    resolve(match[1]);
-                                } else if (attempts >= 10) {
-                                    clearInterval(interval);
-                                    // Check if out of stock keywords appear
-                                    if (/out of keys|all keys claimed|ended/i.test(bodyText)) {
-                                        resolve("0 Keys Remaining (Out of Stock)");
-                                    } else {
-                                        resolve("Keys Available");
-                                    }
-                                }
-                            }, 800);
-                        });
-                    }""")
-
-                    if keys_str and "Keys" in keys_str:
-                        if keys_str.strip().lower().startswith("0") or "out of stock" in keys_str.lower():
-                            keys_str = f"🔴 {keys_str}"
-                        else:
-                            keys_str = f"🟢 {keys_str}"
-                    else:
-                        keys_str = "🟢 Keys Available"
-
                     steam_art, app_id = get_steamdb_artwork(tab_name)
 
                     slug = slugify(tab_name)
@@ -315,10 +265,9 @@ def check_amd_promotions():
                         collected_items.append({
                             "title": tab_name,
                             "url": "https://www.amdgaming.com/promotions",
-                            "keys": keys_str,
                             "img": steam_art,
                             "app_id": app_id,
-                            "source": "AMD Promotions Live Page",
+                            "source": "AMD Promotions Page",
                             "track_key": track_key,
                             "ping": (track_key not in seen and not first_run)
                         })
@@ -334,7 +283,6 @@ def check_amd_promotions():
         send_discord_card(
             title=item["title"],
             url=item["url"],
-            keys_text=item["keys"],
             image_url=item["img"],
             steam_app_id=item.get("app_id"),
             source=item["source"],
