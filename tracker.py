@@ -5,8 +5,10 @@ import requests
 
 SITEMAP_URL = "https://www.amdgaming.com/sitemap.xml"
 SEEN_URLS_FILE = "seen_urls.json"
-WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-ROLE_ID = "1563847704541405325"  # Your @AMD Drop Hunter role ID
+
+# Pre-configured configuration with your updated Role ID
+WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
+ROLE_ID = "1563847704541405324"  # Your updated @AMD Drop Hunter role ID
 
 def load_seen_urls():
     if os.path.exists(SEEN_URLS_FILE):
@@ -50,10 +52,6 @@ def fetch_sitemap_urls():
         return []
 
 def send_discord_alert(url):
-    if not WEBHOOK_URL:
-        print("Webhook URL not found in environment variables.")
-        return
-
     # Filter keywords to ensure it's a promotion/drop link
     if "promotion" not in url.lower() and "key" not in url.lower():
         return
