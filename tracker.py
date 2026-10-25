@@ -8,7 +8,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_ONLY_V4"
+INIT_FLAG = "PROMO_KEYS_V5"
 
 
 def load_seen():
@@ -27,13 +27,13 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def send_discord_card(title, url, keys_text, image_url=None, source="Promotions Page", ping=True):
+def send_discord_card(title, url, keys_text, image_url=None, source="Promotions Page", ping=False):
     if not WEBHOOK_URL:
-        print("Missing DISCORD_WEBHOOK!")
+        print("CRITICAL ERROR: DISCORD_WEBHOOK secret is empty or missing!")
         return
 
     is_empty = "0 keys" in keys_text.lower()
-    color = 9807270 if is_empty else 15548997  # Grey if 0 keys, AMD Red if keys available
+    color = 9807270 if is_empty else 15548997
 
     embed = {
         "title": f"🎮 {title}",
@@ -46,7 +46,7 @@ def send_discord_card(title, url, keys_text, image_url=None, source="Promotions 
         "color": color,
     }
 
-    if image_url and image_url.startswith("http"):
+    if image_url and str(image_url).startswith("http"):
         embed["image"] = {"url": image_url}
 
     payload = {
@@ -54,170 +54,231 @@ def send_discord_card(title, url, keys_text, image_url=None, source="Promotions 
         "embeds": [embed],
     }
     if ping and not is_empty:
-        payload["content"] = f"@everyone 🚨 **AMD Game Key Drop: {title} ({keys_text})**"
+        payload["content"] = f"@everyone 🚨 **NEW AMD GAME KEY DROP: {title} ({keys_text})**"
 
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-        print(f"Sent Discord card for '{title}': HTTP {r.status_code}")
+        print(f"Discord Webhook Response for '{title}': HTTP {r.status_code}")
         time.sleep(1.5)
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Webhook delivery failed: {e}")
 
 
 def check_amd_promotions():
     seen = load_seen()
     is_manual = EVENT_NAME == "workflow_dispatch"
-    first_v4_run = INIT_FLAG not in seen
+    first_v5_run = INIT_FLAG not in seen
     updated = False
     cards_sent = 0
+    debug_log = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Use stealth flags so Cloudflare doesn't detect headless mode
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
+        )
+        # Hide navigator.webdriver flag
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = context.new_page()
 
+        # Intercept any background JSON responses containing promotion data
+        network_blobs = []
+
+        def handle_response(response):
+            try:
+                ctype = response.headers.get("content-type", "")
+                if "json" in ctype or "promotions" in response.url:
+                    txt = response.text()
+                    if "giveaway" in txt.lower() or "keys" in txt.lower():
+                        network_blobs.append(txt)
+            except Exception:
+                pass
+
+        page.on("response", handle_response)
+
         # ---------------------------------------------------------
-        # 1. EARLY DETECTION: Check Sitemap XML for hidden /promotions/ URLs
+        # 1. Check Sitemap XML for Early Unlisted /promotions/ Links
         # ---------------------------------------------------------
         try:
-            print("Checking Sitemap for early /promotions/ links...")
-            resp = page.goto("https://www.amdgaming.com/sitemap.xml", timeout=20000)
+            resp = page.goto(
+                "https://www.amdgaming.com/sitemap.xml",
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+            status_code = resp.status if resp else "None"
+            debug_log.append(f"Sitemap HTTP: {status_code}")
             if resp and resp.status == 200:
                 xml_text = page.content()
                 early_urls = re.findall(
                     r"https://www\.amdgaming\.com/promotions/[a-zA-Z0-9-_]+", xml_text
                 )
                 for promo_url in set(early_urls):
-                    if promo_url not in seen:
+                    if promo_url not in seen or first_v5_run or is_manual:
                         name = promo_url.split("/")[-1].replace("-", " ").title()
                         send_discord_card(
                             title=name,
                             url=promo_url,
-                            keys_text="⏳ Early Sitemap Link / Check Keys",
-                            source="Sitemap XML (Early Detection)",
-                            ping=not first_v4_run,
+                            keys_text="🟢 Active / Early Sitemap Link",
+                            source="Sitemap XML",
+                            ping=(promo_url not in seen and not first_v5_run),
                         )
                         seen.add(promo_url)
                         updated = True
                         cards_sent += 1
         except Exception as e:
-            print(f"Sitemap scan error: {e}")
+            debug_log.append(f"Sitemap Error: {str(e)[:60]}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Click every sidebar tab & read Keys + Image
+        # 2. Check Live Promotions Page (DOM + JS Tabs + Network)
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
-            page.goto(
+            resp = page.goto(
                 "https://www.amdgaming.com/promotions",
-                wait_until="networkidle",
-                timeout=45000,
+                wait_until="domcontentloaded",
+                timeout=30000,
             )
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(7000)  # Let JS render the left sidebar & key count
 
-            # Find all giveaway tabs on the left sidebar (or anywhere on the page)
-            # We look for clickable elements containing "Giveaway", "Key", or "Bonus"
-            tab_candidates = page.locator(
-                "li, button, a, [role='tab'], div"
-            ).filter(has_text=re.compile(r"Giveaway|Key\s+Giveaway", re.I))
+            page_title = page.title()
+            body_text = page.inner_text("body")
+            html = page.content()
+            debug_log.append(
+                f"Promos HTTP: {resp.status if resp else 'None'} | Title: {page_title}"
+            )
 
-            # Extract unique tab names from the left menu
-            raw_texts = tab_candidates.all_inner_texts()
-            tab_names = []
-            for t in raw_texts:
-                clean = t.strip()
-                # Filter for clean single-line tab titles (like "World of Warships Naval Supplies Giveaway")
+            # Extract any /promotions/game-key-giveaway slugs from HTML or Network JSON
+            combined_source = html + "\n" + "\n".join(network_blobs)
+            slug_matches = re.findall(
+                r"/promotions[/#]([a-zA-Z0-9-_]+giveaway[a-zA-Z0-9-_]*)",
+                combined_source,
+                re.I,
+            )
+
+            # Find all visible text lines on the page that end with "Giveaway" (Matches the left sidebar!)
+            lines = [line.strip() for line in body_text.split("\n") if line.strip()]
+            sidebar_tabs = []
+            for line in lines:
                 if (
-                    5 < len(clean) < 85
-                    and "\n" not in clean
-                    and "discover a trove" not in clean.lower()
-                    and "featured giveaway" not in clean.lower()
-                    and clean not in tab_names
+                    re.search(r"Giveaway!?$", line, re.I)
+                    and 8 < len(line) < 75
+                    and "featured giveaway" not in line.lower()
+                    and "exclusive giveaways" not in line.lower()
+                    and line not in sidebar_tabs
                 ):
-                    tab_names.append(clean)
+                    sidebar_tabs.append(line)
 
-            print(f"Found promotion tabs: {tab_names}")
+            debug_log.append(f"Sidebar Tabs Found: {len(sidebar_tabs)} | Slugs: {len(set(slug_matches))}")
+            print(f"Detected Sidebar Tabs: {sidebar_tabs}")
 
-            # If no multiple tabs found, still scan the active featured giveaway
-            if not tab_names:
-                tab_names = ["Current Featured Promotion"]
-
-            for tab_title in tab_names:
+            # Click each sidebar tab and grab its image + "XXXX Keys Remaining"
+            for tab_name in sidebar_tabs:
                 try:
-                    if tab_title != "Current Featured Promotion":
-                        # Click the tab on the left sidebar to load its image and key count
-                        tab_el = page.get_by_text(tab_title, exact=True).first
-                        if tab_el.is_visible():
-                            tab_el.click()
-                            page.wait_for_timeout(2000)
-
-                    body_text = page.inner_text("body")
-                    html = page.content()
-
-                    # Extract exact "XXXX Keys Remaining"
-                    key_match = re.search(
-                        r"([\d,]+\s+Keys?\s+Remaining)", body_text, re.I
+                    # Click via JS so overlays don't block Playwright
+                    page.evaluate(
+                        """(targetText) => {
+                            const els = Array.from(document.querySelectorAll('*'));
+                            const match = els.find(el => el.children.length === 0 && el.textContent.trim() === targetText);
+                            if (match) match.click();
+                        }""",
+                        tab_name,
                     )
-                    keys_status = (
+                    page.wait_for_timeout(2000)
+
+                    current_text = page.inner_text("body")
+                    key_match = re.search(
+                        r"([\d,]+\s+Keys?\s+Remaining)", current_text, re.I
+                    )
+                    keys_str = (
                         f"🟢 {key_match.group(1)}"
                         if key_match
-                        else "🟢 Keys Available (Check Page)"
+                        else "🟢 Keys Available"
                     )
-                    if key_match and key_match.group(1).strip().startswith("0 "):
-                        keys_status = "🔴 0 Keys Remaining (Out of Stock)"
+                    if key_match and key_match.group(1).strip().startswith("0"):
+                        keys_str = "🔴 0 Keys Remaining"
 
-                    # Grab the main promo artwork image currently displayed
-                    promo_img = None
-                    imgs = page.locator("img").all()
-                    for img in imgs:
-                        src = img.get_attribute("src") or ""
-                        width = img.bounding_box()
-                        if (
-                            src.startswith("http")
-                            and "logo" not in src.lower()
-                            and "avatar" not in src.lower()
-                            and width
-                            and width.get("width", 0) > 200
-                        ):
-                            promo_img = src
-                            break
+                    # Grab the visible game artwork image via JS
+                    img_url = page.evaluate(
+                        """() => {
+                            const imgs = Array.from(document.querySelectorAll('img'));
+                            const bigImg = imgs.find(i => i.width > 220 && i.height > 100 && i.src.startsWith('http') && !i.src.toLowerCase().includes('logo'));
+                            return bigImg ? bigImg.src : null;
+                        }"""
+                    )
 
-                    # Build the direct promotion link
-                    promo_slug = slugify(tab_title)
-                    direct_url = f"https://www.amdgaming.com/promotions/{promo_slug}"
-                    track_id = f"PROMO_TAB::{promo_slug}"
+                    slug = slugify(tab_name)
+                    track_key = f"TAB::{slug}"
+                    promo_link = f"https://www.amdgaming.com/promotions/{slug}"
 
-                    if track_id not in seen or first_v4_run or is_manual:
+                    if track_key not in seen or first_v5_run or is_manual:
                         send_discord_card(
-                            title=tab_title,
+                            title=tab_name,
                             url="https://www.amdgaming.com/promotions",
-                            keys_text=keys_status,
-                            image_url=promo_img,
-                            source="AMD Promotions Page",
-                            ping=(track_id not in seen and not first_v4_run),
+                            keys_text=keys_str,
+                            image_url=img_url,
+                            source="AMD Promotions Live Page",
+                            ping=(track_key not in seen and not first_v5_run),
                         )
-                        seen.add(track_id)
-                        seen.add(direct_url)
+                        seen.add(track_key)
+                        seen.add(promo_link)
                         updated = True
                         cards_sent += 1
+                except Exception as tab_e:
+                    print(f"Tab error for {tab_name}: {tab_e}")
 
-                except Exception as tab_err:
-                    print(f"Error inspecting tab '{tab_title}': {tab_err}")
+            # Also report any hidden slugs caught in the background network/HTML
+            for s in set(slug_matches):
+                track_key = f"TAB::{s.lower()}"
+                full_link = f"https://www.amdgaming.com/promotions/{s}"
+                if track_key not in seen and full_link not in seen:
+                    clean_title = s.replace("-", " ").title()
+                    send_discord_card(
+                        title=clean_title,
+                        url=full_link,
+                        keys_text="⏳ Early / Hidden Promotion Link",
+                        source="Background Code Scanner",
+                        ping=not first_v5_run,
+                    )
+                    seen.add(track_key)
+                    seen.add(full_link)
+                    updated = True
+                    cards_sent += 1
 
         except Exception as e:
-            print(f"Promotions page scan error: {e}")
+            debug_log.append(f"Promos Error: {str(e)[:80]}")
 
         browser.close()
 
-    if first_v4_run:
+    if first_v5_run and cards_sent > 0:
         seen.add(INIT_FLAG)
         updated = True
 
     if updated:
         save_seen(seen)
+
+    # ---------------------------------------------------------
+    # 3. GUARANTEED DIAGNOSTIC MESSAGE IF 0 CARDS WERE SENT
+    # ---------------------------------------------------------
+    if cards_sent == 0 and (is_manual or first_v5_run):
+        diag_text = "\n".join([f"• `{line}`" for line in debug_log])
+        send_discord_card(
+            title="Tracker Diagnostic Report",
+            url="https://www.amdgaming.com/promotions",
+            keys_text="See Diagnostic Log Below",
+            source=f"GitHub Actions\n\n**What the server saw:**\n{diag_text}",
+            ping=False,
+        )
 
 
 if __name__ == "__main__":
