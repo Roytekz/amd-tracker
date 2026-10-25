@@ -9,7 +9,7 @@ import requests
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 SEEN_FILE = "amd_seen.json"
-INIT_FLAG = "PROMO_KEYS_V20_STABLE"
+INIT_FLAG = "PROMO_KEYS_V21_LIVE_COUNTER"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -224,7 +224,7 @@ def check_amd_promotions():
             print(f"Forum API check error: {e}")
 
         # ---------------------------------------------------------
-        # 2. LIVE PROMOTIONS PAGE: Tabs & Stable Status Display
+        # 2. LIVE PROMOTIONS PAGE: Tabs & Live Key Counter Extraction
         # ---------------------------------------------------------
         try:
             print("Opening https://www.amdgaming.com/promotions ...")
@@ -272,10 +272,39 @@ def check_amd_promotions():
                         }""",
                         tab_name,
                     )
-                    page.wait_for_timeout(3000)
+                    
+                    # LIVE KEY COUNTER EXTRACTOR: Polls the page for up to 8 seconds until the live key number loads
+                    keys_str = page.evaluate("""() => {
+                        return new Promise((resolve) => {
+                            let attempts = 0;
+                            const interval = setInterval(() => {
+                                attempts++;
+                                const bodyText = document.body.innerText;
+                                // Look for pattern like "8791 Keys Remaining" or similar digits near keys
+                                const match = bodyText.match(/([\\d,]+\\s+Keys?\\s+(?:Remaining|Left))/i);
+                                if (match) {
+                                    clearInterval(interval);
+                                    resolve(match[1]);
+                                } else if (attempts >= 10) {
+                                    clearInterval(interval);
+                                    // Check if out of stock keywords appear
+                                    if (/out of keys|all keys claimed|ended/i.test(bodyText)) {
+                                        resolve("0 Keys Remaining (Out of Stock)");
+                                    } else {
+                                        resolve("Keys Available");
+                                    }
+                                }
+                            }, 800);
+                        });
+                    }""")
 
-                    # Clean status message (Avoids false zero-key triggers)
-                    keys_str = "🟢 Active Promotion / Keys Available"
+                    if keys_str and "Keys" in keys_str:
+                        if keys_str.strip().lower().startswith("0") or "out of stock" in keys_str.lower():
+                            keys_str = f"🔴 {keys_str}"
+                        else:
+                            keys_str = f"🟢 {keys_str}"
+                    else:
+                        keys_str = "🟢 Keys Available"
 
                     steam_art, app_id = get_steamdb_artwork(tab_name)
 
