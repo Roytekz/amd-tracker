@@ -191,7 +191,7 @@ def send_discord_card(
         "embeds": [embed],
     }
     if ping:
-        payload["content"] = f"@everyone 🚨 **NEW AMD GAME KEY DROP: {title}**"
+        payload["content"] = f"<@&1563847704541405324> 🚨 **NEW AMD GAME KEY DROP: {title}**"
 
     try:
         if screenshot_bytes:
