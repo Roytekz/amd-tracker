@@ -94,7 +94,6 @@ def notify_local_bot(url):
         print(f"❌ [LOCAL TRIGGER] Failed to reach local bot via Ngrok: {e}")
 
 def main():
-    notify_local_bot("https://www.amdgaming.com/promotions/test")
     seen_urls = load_seen_urls()
     current_urls = fetch_sitemap_urls()
     
