@@ -1,16 +1,25 @@
 import os
 import json
+import re
 import xml.etree.ElementTree as ET
 import requests
 
+PROMOTIONS_PAGE_URL = "https://www.amdgaming.com/promotions"
 SITEMAP_URL = "https://www.amdgaming.com/sitemap.xml"
 SEEN_URLS_FILE = "seen_urls.json"
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
-ROLE_ID = "1563847704541405324"  # Your @AMD Drop Hunter role ID
+ROLE_ID = "1563847704541405324"
 
-# Your active Ngrok bridge endpoint pointing to your local AMD bot
+# Update this if your Ngrok domain changes
 LOCAL_BOT_ENDPOINT = "https://waving-penny-crudely.ngrok-free.dev/trigger-drop"
+
+KEYWORDS = ["promotion", "promotions", "key", "claim", "reward", "giveaway", "redeem", "drop"]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 def load_seen_urls():
     if os.path.exists(SEEN_URLS_FILE):
@@ -27,25 +36,42 @@ def save_seen_urls(seen_urls):
 
 def fetch_sitemap_urls():
     try:
-        response = requests.get(SITEMAP_URL, timeout=10)
-        response.raise_for_status()
-        
+        response = requests.get(SITEMAP_URL, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            return []
         root = ET.fromstring(response.content)
         namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
         urls = []
-        
         for loc in root.findall('.//ns:loc', namespaces):
             if loc.text:
                 urls.append(loc.text.strip())
-                
         if not urls:
             for loc in root.iter():
                 if loc.tag.endswith('loc') and loc.text:
                     urls.append(loc.text.strip())
-                    
         return urls
     except Exception as e:
-        print(f"Error fetching sitemap: {e}")
+        print(f"Sitemap check error: {e}")
+        return []
+
+def fetch_live_page_links():
+    """Scrapes the live HTML directly to detect promotions before sitemap indexing."""
+    try:
+        response = requests.get(PROMOTIONS_PAGE_URL, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            return []
+        
+        # Extract all href links from the page
+        found_links = re.findall(r'href=[\'"]?([^\'" >]+)', response.text)
+        cleaned_urls = []
+        for link in found_links:
+            if link.startswith("/"):
+                cleaned_urls.append(f"https://www.amdgaming.com{link}")
+            elif link.startswith("https://"):
+                cleaned_urls.append(link)
+        return list(set(cleaned_urls))
+    except Exception as e:
+        print(f"Page scrape error: {e}")
         return []
 
 def send_discord_alert(url):
@@ -53,66 +79,68 @@ def send_discord_alert(url):
         "content": f"<@&{ROLE_ID}> 🚨 **NEW AMD GAME KEY DROP DETECTED!**",
         "embeds": [
             {
-                "title": "🎁 Early Sitemap Drop Found",
-                "description": f"A brand new drop link has just been indexed on the backend sitemap!\n\n👉 **[Click Here to Claim Key]({url})**",
+                "title": "🎁 Drop Link Found",
+                "description": f"A new drop link was detected live!\n\n👉 **[Click Here to Claim Key]({url})**",
                 "color": 16711680,
                 "fields": [
                     {
-                        "name": "Status",
-                        "value": "`⏳ Early Sitemap Link`",
-                        "inline": True
+                        "name": "Target",
+                        "value": f"`{url}`",
+                        "inline": False
                     }
                 ],
                 "footer": {
-                    "text": "AMD Drop Hunter • Automated Early Tracker"
+                    "text": "AMD Drop Hunter • Real-time Web Tracker"
                 }
             }
         ]
     }
-
     try:
-        response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-        if response.status_code == 204:
-            print(f"Successfully alerted Discord for: {url}")
-        else:
-            print(f"Failed to send Discord webhook: {response.status_code}, {response.text}")
+        requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        print(f"Successfully alerted Discord for: {url}")
     except Exception as e:
         print(f"Error sending Discord webhook: {e}")
 
 def notify_local_bot(url):
-    """Sends the drop URL directly to your running AMD proxy bot via Ngrok."""
     payload = {"url": url}
     headers = {"Content-Type": "application/json"}
-    
     try:
         response = requests.post(LOCAL_BOT_ENDPOINT, json=payload, headers=headers, timeout=5)
         if response.status_code == 200:
-            print(f"🚀 [LOCAL TRIGGER] Successfully fired AMD bot profiles for: {url}")
+            print(f"🚀 [LOCAL TRIGGER] Successfully triggered AMD bot for: {url}")
         else:
-            print(f"⚠️ [LOCAL TRIGGER] Bot rejected request with status: {response.status_code}")
+            print(f"⚠️ [LOCAL TRIGGER] Bot rejected status: {response.status_code}")
     except Exception as e:
-        print(f"❌ [LOCAL TRIGGER] Failed to reach local bot via Ngrok: {e}")
+        print(f"❌ [LOCAL TRIGGER] Failed to reach local bot: {e}")
 
 def main():
     seen_urls = load_seen_urls()
-    current_urls = fetch_sitemap_urls()
     
-    if not current_urls:
-        print("No URLs retrieved from sitemap.")
+    # Check both backend sitemap and live HTML page
+    collected_urls = set(fetch_sitemap_urls() + fetch_live_page_links())
+    
+    if not collected_urls:
+        print("No URLs retrieved.")
+        return
+
+    # Seed baseline if running on an empty file so it does not blast old links
+    if not seen_urls:
+        print("Seeding initial URL list into seen_urls.json...")
+        save_seen_urls(collected_urls)
         return
 
     new_drops_found = False
-    for url in current_urls:
-        # Strict filter: Must contain 'promotion' or 'key', and must not have been seen before
-        if url not in seen_urls and ("promotion" in url.lower() or "key" in url.lower()):
-            print(f"New drop discovered: {url}")
+    for url in collected_urls:
+        url_lower = url.lower()
+        # Matches any AMD drop URL containing our target keywords
+        if url not in seen_urls and any(keyword in url_lower for keyword in KEYWORDS):
+            # Ignore standard root pages
+            if url_lower.rstrip("/") in ["https://www.amdgaming.com", "https://www.amdgaming.com/promotions"]:
+                continue
             
-            # 1. Dispatch Discord ping
+            print(f"🔥 NEW DROP DISCOVERED: {url}")
             send_discord_alert(url)
-            
-            # 2. Trigger local AMD 20-account bot instantly
             notify_local_bot(url)
-            
             seen_urls.add(url)
             new_drops_found = True
 
