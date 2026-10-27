@@ -1,38 +1,28 @@
 import os
 import json
-import re
 import time
 import datetime
-import xml.etree.ElementTree as ET
 import requests
 
-PROMOTIONS_PAGE_URL = "https://www.amdgaming.com/promotions"
-SITEMAP_URL = "https://www.amdgaming.com/sitemap.xml"
+# Live API endpoints for the promotions category
+PROMOTIONS_API_URLS = [
+    "https://www.amdgaming.com/c/promotions.json",
+    "https://www.amdgaming.com/promotions.json",
+    "https://www.amdgaming.com/latest.json"
+]
+
 SEEN_URLS_FILE = "seen_urls.json"
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
 ROLE_ID = "1563847704541405324"
 
-# Set this to your live Ngrok forwarding URL
+# Set this to your live Ngrok endpoint
 LOCAL_BOT_ENDPOINT = "https://waving-penny-crudely.ngrok-free.dev/trigger-drop"
-
-KEYWORDS = ["promotion", "promotions", "key", "claim", "reward", "giveaway", "redeem", "drop"]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json",
 }
-
-# Assets and internal paths to strip out completely
-IGNORED_EXTENSIONS = (
-    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
-    ".ico", ".webmanifest", ".map", ".woff", ".woff2", ".ttf"
-)
-
-IGNORED_PATHS = (
-    "/assets/", "/stylesheets/", "/theme-javascripts/",
-    "/uploads/", "/plugins/", "/optimized/"
-)
 
 def load_seen_urls():
     if os.path.exists(SEEN_URLS_FILE):
@@ -47,79 +37,46 @@ def save_seen_urls(seen_urls):
     with open(SEEN_URLS_FILE, "w") as f:
         json.dump(sorted(list(seen_urls)), f, indent=2)
 
-def is_valid_page_url(url):
-    """Filters out forum static assets, scripts, stylesheets, and icons."""
-    url_lower = url.lower().split('?')[0].split('#')[0]
-    if any(url_lower.endswith(ext) for ext in IGNORED_EXTENSIONS):
-        return False
-    if any(blocked in url_lower for blocked in IGNORED_PATHS):
-        return False
-    return True
+def fetch_live_promotion_topics():
+    """Queries AMD Gaming's Discourse JSON API to get real, active promotion topics."""
+    found_topics = []
+    
+    for api_url in PROMOTIONS_API_URLS:
+        try:
+            res = requests.get(api_url, headers=HEADERS, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                # Extract topics list from Discourse response
+                topic_list = data.get("topic_list", {}).get("topics", [])
+                for topic in topic_list:
+                    slug = topic.get("slug")
+                    topic_id = topic.get("id")
+                    title = topic.get("title", "AMD Game Drop")
+                    
+                    if slug and topic_id:
+                        # Real forum promotion link format
+                        topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
+                        found_topics.append({
+                            "url": topic_url,
+                            "title": title
+                        })
+        except Exception as e:
+            print(f"Error fetching API from {api_url}: {e}")
+            continue
 
-def fetch_sitemap_urls():
-    try:
-        response = requests.get(SITEMAP_URL, headers=HEADERS, timeout=10)
-        if response.status_code != 200:
-            return []
-        root = ET.fromstring(response.content)
-        namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-        urls = []
-        for loc in root.findall('.//ns:loc', namespaces):
-            if loc.text:
-                urls.append(loc.text.strip())
-        if not urls:
-            for loc in root.iter():
-                if loc.tag.endswith('loc') and loc.text:
-                    urls.append(loc.text.strip())
-        return [u for u in urls if is_valid_page_url(u)]
-    except Exception as e:
-        print(f"Sitemap check error: {e}")
-        return []
+    return found_topics
 
-def fetch_live_page_links():
-    """Scrapes only real anchor links from the HTML page, ignoring all system assets."""
-    try:
-        response = requests.get(PROMOTIONS_PAGE_URL, headers=HEADERS, timeout=10)
-        if response.status_code != 200:
-            return []
-        
-        # Only inspect actual HTML anchor tags: <a ... href="..." ...>
-        found_links = re.findall(r'<a\s+(?:[^>]*?\s+)?href=[\'"]([^\'"]+)', response.text, re.IGNORECASE)
-        cleaned_urls = []
-        
-        for link in found_links:
-            clean_link = link.split('#')[0].split('?')[0].strip()
-            
-            if not clean_link or clean_link.startswith(("javascript:", "mailto:", "tel:")):
-                continue
-
-            # Build full absolute AMD Gaming URL
-            if clean_link.startswith("/"):
-                full_url = f"https://www.amdgaming.com{clean_link}"
-            elif clean_link.startswith("https://www.amdgaming.com"):
-                full_url = clean_link
-            else:
-                continue  # Skip outside URLs
-
-            if is_valid_page_url(full_url):
-                cleaned_urls.append(full_url)
-
-        return list(set(cleaned_urls))
-    except Exception as e:
-        print(f"Page scrape error: {e}")
-        return []
-
-def send_discord_alert(url):
+def send_discord_alert(url, title):
     payload = {
         "content": f"<@&{ROLE_ID}> 🚨 **NEW AMD GAME KEY DROP DETECTED!**",
         "embeds": [
             {
-                "title": "🎁 Drop Link Found",
-                "description": f"A new drop link has appeared live!\n\n👉 **[Click Here to Claim Key]({url})**",
+                "title": f"🎁 {title}",
+                "description": f"A brand new promotion topic went live!\n\n👉 **[Click Here to Claim Key]({url})**",
                 "color": 16711680,
                 "fields": [
                     {
-                        "name": "Target URL",
+                        "name": "Drop URL",
                         "value": f"`{url}`",
                         "inline": False
                     }
@@ -149,30 +106,28 @@ def notify_local_bot(url):
         print(f"❌ [LOCAL TRIGGER] Failed to reach local bot: {e}")
 
 def check_for_drops():
-    """Runs a check across the sitemap and HTML anchor elements."""
     seen_urls = load_seen_urls()
-    collected_urls = set(fetch_sitemap_urls() + fetch_live_page_links())
+    topics = fetch_live_promotion_topics()
     
-    if not collected_urls:
-        print("No URLs retrieved during check.")
+    if not topics:
+        print("No topics found or unable to reach API.")
         return False
 
-    # Seed baseline if run with an empty seen_urls.json
+    # Seed baseline if running on empty seen_urls.json
     if not seen_urls:
-        print("First run: Seeding clean baseline page URLs into seen_urls.json...")
-        save_seen_urls(collected_urls)
+        print("Seeding current active promotions into seen_urls.json...")
+        all_current = {t["url"] for t in topics}
+        save_seen_urls(all_current)
         return False
 
     new_drops_found = False
-    for url in collected_urls:
-        url_lower = url.lower()
-        if url not in seen_urls and any(keyword in url_lower for keyword in KEYWORDS):
-            # Ignore standard root pages
-            if url_lower.rstrip("/") in ["https://www.amdgaming.com", "https://www.amdgaming.com/promotions"]:
-                continue
-            
-            print(f"🔥 NEW DROP DETECTED: {url}")
-            send_discord_alert(url)
+    for item in topics:
+        url = item["url"]
+        title = item["title"]
+        
+        if url not in seen_urls:
+            print(f"🔥 NEW GAME DROP DETECTED: {title} ({url})")
+            send_discord_alert(url, title)
             notify_local_bot(url)
             seen_urls.add(url)
             new_drops_found = True
@@ -181,7 +136,7 @@ def check_for_drops():
         save_seen_urls(seen_urls)
         return True
     else:
-        print("No new promotion/key drops found in this pass.")
+        print("No new promotions found in this check.")
         return False
 
 def main():
@@ -193,8 +148,7 @@ def main():
     if in_critical_window:
         print("🎯 ENTERING HIGH-SPEED SURVEILLANCE MODE (Polling every 10s)...")
         start_time = time.time()
-        # Stay active in runner for 15 minutes (900 seconds)
-        while time.time() - start_time < 900:
+        while time.time() - start_time < 900:  # Run loop for 15 minutes
             found = check_for_drops()
             if found:
                 print("Drop triggered and processed. Exiting surveillance loop.")
