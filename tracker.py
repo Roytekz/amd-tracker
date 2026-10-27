@@ -1,27 +1,24 @@
 import os
 import json
+import re
 import time
 import datetime
 import requests
 
-# Live API endpoints for the promotions category
-PROMOTIONS_API_URLS = [
-    "https://www.amdgaming.com/c/promotions.json",
-    "https://www.amdgaming.com/promotions.json",
-    "https://www.amdgaming.com/latest.json"
-]
-
+PROMOTIONS_URL = "https://www.amdgaming.com/promotions"
 SEEN_URLS_FILE = "seen_urls.json"
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
 ROLE_ID = "1563847704541405324"
 
-# Set this to your live Ngrok endpoint
+# Live Ngrok endpoint
 LOCAL_BOT_ENDPOINT = "https://waving-penny-crudely.ngrok-free.dev/trigger-drop"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": "https://www.amdgaming.com/promotions"
 }
 
 def load_seen_urls():
@@ -37,34 +34,58 @@ def save_seen_urls(seen_urls):
     with open(SEEN_URLS_FILE, "w") as f:
         json.dump(sorted(list(seen_urls)), f, indent=2)
 
-def fetch_live_promotion_topics():
-    """Queries AMD Gaming's Discourse JSON API to get real, active promotion topics."""
-    found_topics = []
-    
-    for api_url in PROMOTIONS_API_URLS:
-        try:
-            res = requests.get(api_url, headers=HEADERS, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                # Extract topics list from Discourse response
-                topic_list = data.get("topic_list", {}).get("topics", [])
-                for topic in topic_list:
-                    slug = topic.get("slug")
-                    topic_id = topic.get("id")
-                    title = topic.get("title", "AMD Game Drop")
+def fetch_promotions():
+    """Fetches promotions data from amdgaming.com/promotions using JSON content negotiation."""
+    found_items = []
+    try:
+        res = requests.get(PROMOTIONS_URL, headers=HEADERS, timeout=10)
+        
+        # Scenario A: Discourse responds with JSON
+        if "application/json" in res.headers.get("Content-Type", ""):
+            data = res.json()
+            
+            # 1. Check if it's formatted as standard Discourse topics
+            topics = data.get("topic_list", {}).get("topics", [])
+            for t in topics:
+                slug = t.get("slug")
+                topic_id = t.get("id")
+                title = t.get("title", "AMD Promotion Drop")
+                if slug and topic_id:
+                    found_items.append({
+                        "url": f"https://www.amdgaming.com/t/{slug}/{topic_id}",
+                        "title": title
+                    })
+            
+            # 2. Check if it's a custom promotions plugin response
+            promos = data.get("promotions", []) or data.get("data", []) or data.get("items", [])
+            for p in promos:
+                slug = p.get("slug") or p.get("id")
+                title = p.get("title") or p.get("name", "AMD Game Key")
+                link = p.get("url") or (f"https://www.amdgaming.com/promotions/{slug}" if slug else None)
+                if link:
+                    full_link = link if link.startswith("http") else f"https://www.amdgaming.com{link}"
+                    found_items.append({
+                        "url": full_link,
+                        "title": title
+                    })
                     
-                    if slug and topic_id:
-                        # Real forum promotion link format
-                        topic_url = f"https://www.amdgaming.com/t/{slug}/{topic_id}"
-                        found_topics.append({
-                            "url": topic_url,
-                            "title": title
-                        })
-        except Exception as e:
-            print(f"Error fetching API from {api_url}: {e}")
-            continue
+        # Scenario B: Endpoint returns HTML directly
+        else:
+            links = re.findall(r'href=[\'"]([^\'"]*promotions[^\'"]*|\/t\/[^\'"]+)[\'"]', res.text, re.IGNORECASE)
+            for link in set(links):
+                clean = link.split('#')[0].split('?')[0].strip()
+                if clean in ["/promotions", "https://www.amdgaming.com/promotions"]:
+                    continue
+                full_url = f"https://www.amdgaming.com{clean}" if clean.startswith("/") else clean
+                found_items.append({
+                    "url": full_url,
+                    "title": "AMD Game Promotion"
+                })
 
-    return found_topics
+    except Exception as e:
+        print(f"Error fetching promotions endpoint: {e}")
+
+    return found_items
 
 def send_discord_alert(url, title):
     payload = {
@@ -107,21 +128,20 @@ def notify_local_bot(url):
 
 def check_for_drops():
     seen_urls = load_seen_urls()
-    topics = fetch_live_promotion_topics()
+    promotions = fetch_promotions()
     
-    if not topics:
-        print("No topics found or unable to reach API.")
+    if not promotions:
+        print("No promotions detected on this pass.")
         return False
 
-    # Seed baseline if running on empty seen_urls.json
     if not seen_urls:
-        print("Seeding current active promotions into seen_urls.json...")
-        all_current = {t["url"] for t in topics}
+        print("Seeding current promotions into seen_urls.json...")
+        all_current = {p["url"] for p in promotions}
         save_seen_urls(all_current)
         return False
 
     new_drops_found = False
-    for item in topics:
+    for item in promotions:
         url = item["url"]
         title = item["title"]
         
@@ -148,7 +168,7 @@ def main():
     if in_critical_window:
         print("🎯 ENTERING HIGH-SPEED SURVEILLANCE MODE (Polling every 10s)...")
         start_time = time.time()
-        while time.time() - start_time < 900:  # Run loop for 15 minutes
+        while time.time() - start_time < 900:
             found = check_for_drops()
             if found:
                 print("Drop triggered and processed. Exiting surveillance loop.")
