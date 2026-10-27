@@ -34,8 +34,18 @@ def save_seen_urls(seen_urls):
     with open(SEEN_URLS_FILE, "w") as f:
         json.dump(sorted(list(seen_urls)), f, indent=2)
 
+def clean_image_url(image_url):
+    """Ensures image URL has full protocol and valid format."""
+    if not image_url:
+        return None
+    if image_url.startswith("//"):
+        return f"https:{image_url}"
+    elif image_url.startswith("/"):
+        return f"https://www.amdgaming.com{image_url}"
+    return image_url
+
 def fetch_promotions():
-    """Fetches promotions data from amdgaming.com/promotions using JSON content negotiation."""
+    """Fetches promotion drop items along with title, target URL, and artwork."""
     found_items = []
     try:
         res = requests.get(PROMOTIONS_URL, headers=HEADERS, timeout=10)
@@ -44,32 +54,44 @@ def fetch_promotions():
         if "application/json" in res.headers.get("Content-Type", ""):
             data = res.json()
             
-            # 1. Check if it's formatted as standard Discourse topics
+            # 1. Standard Discourse topic objects
             topics = data.get("topic_list", {}).get("topics", [])
             for t in topics:
                 slug = t.get("slug")
                 topic_id = t.get("id")
                 title = t.get("title", "AMD Promotion Drop")
+                image = clean_image_url(t.get("image_url") or t.get("featured_link"))
+                
                 if slug and topic_id:
                     found_items.append({
                         "url": f"https://www.amdgaming.com/t/{slug}/{topic_id}",
-                        "title": title
+                        "title": title,
+                        "image": image
                     })
             
-            # 2. Check if it's a custom promotions plugin response
+            # 2. Custom promotions plugin structure
             promos = data.get("promotions", []) or data.get("data", []) or data.get("items", [])
             for p in promos:
                 slug = p.get("slug") or p.get("id")
                 title = p.get("title") or p.get("name", "AMD Game Key")
+                raw_image = (
+                    p.get("image_url") or 
+                    p.get("banner") or 
+                    p.get("thumbnail") or 
+                    p.get("cover")
+                )
+                image = clean_image_url(raw_image)
                 link = p.get("url") or (f"https://www.amdgaming.com/promotions/{slug}" if slug else None)
+                
                 if link:
                     full_link = link if link.startswith("http") else f"https://www.amdgaming.com{link}"
                     found_items.append({
                         "url": full_link,
-                        "title": title
+                        "title": title,
+                        "image": image
                     })
                     
-        # Scenario B: Endpoint returns HTML directly
+        # Scenario B: Fallback HTML parsing
         else:
             links = re.findall(r'href=[\'"]([^\'"]*promotions[^\'"]*|\/t\/[^\'"]+)[\'"]', res.text, re.IGNORECASE)
             for link in set(links):
@@ -79,7 +101,8 @@ def fetch_promotions():
                 full_url = f"https://www.amdgaming.com{clean}" if clean.startswith("/") else clean
                 found_items.append({
                     "url": full_url,
-                    "title": "AMD Game Promotion"
+                    "title": "AMD Game Promotion",
+                    "image": None
                 })
 
     except Exception as e:
@@ -87,30 +110,35 @@ def fetch_promotions():
 
     return found_items
 
-def send_discord_alert(url, title):
+def send_discord_alert(url, title, image_url=None):
+    embed_data = {
+        "title": f"🎁 {title}",
+        "description": f"A brand new game key drop is live!\n\n👉 **[Click Here to Claim Key]({url})**",
+        "color": 16711680,
+        "fields": [
+            {
+                "name": "Drop URL",
+                "value": f"`{url}`",
+                "inline": False
+            }
+        ],
+        "footer": {
+            "text": "AMD Drop Hunter • Real-time Web Tracker"
+        }
+    }
+
+    # Embed artwork banner if present
+    if image_url:
+        embed_data["image"] = {"url": image_url}
+
     payload = {
         "content": f"<@&{ROLE_ID}> 🚨 **NEW AMD GAME KEY DROP DETECTED!**",
-        "embeds": [
-            {
-                "title": f"🎁 {title}",
-                "description": f"A brand new promotion topic went live!\n\n👉 **[Click Here to Claim Key]({url})**",
-                "color": 16711680,
-                "fields": [
-                    {
-                        "name": "Drop URL",
-                        "value": f"`{url}`",
-                        "inline": False
-                    }
-                ],
-                "footer": {
-                    "text": "AMD Drop Hunter • Real-time Web Tracker"
-                }
-            }
-        ]
+        "embeds": [embed_data]
     }
+
     try:
         requests.post(WEBHOOK_URL, json=payload, timeout=10)
-        print(f"Successfully alerted Discord for: {url}")
+        print(f"Successfully alerted Discord for: {url} (Image: {image_url})")
     except Exception as e:
         print(f"Error sending Discord webhook: {e}")
 
@@ -144,10 +172,11 @@ def check_for_drops():
     for item in promotions:
         url = item["url"]
         title = item["title"]
+        image = item.get("image")
         
         if url not in seen_urls:
             print(f"🔥 NEW GAME DROP DETECTED: {title} ({url})")
-            send_discord_alert(url, title)
+            send_discord_alert(url, title, image)
             notify_local_bot(url)
             seen_urls.add(url)
             new_drops_found = True
