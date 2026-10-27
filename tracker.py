@@ -11,6 +11,7 @@ SEEN_URLS_FILE = "seen_urls.json"
 WEBHOOK_URL = "https://discord.com/api/webhooks/1563618599346770040/bZC29aczTJtkqsqZYt1i-9BbeAjjlGzIkMaKAamodSq0MKS4EDuJsexNeypCjJfo7VQA"
 ROLE_ID = "1563847704541405324"
 
+# Set this to your live Ngrok endpoint URL
 LOCAL_BOT_ENDPOINT = "https://waving-penny-crudely.ngrok-free.dev/trigger-drop"
 
 HEADERS = {
@@ -46,7 +47,7 @@ def clean_image_url(url):
     return None
 
 def fetch_artwork_from_page(target_url):
-    """Scrapes og:image meta tag directly from the drop page if not in JSON list."""
+    """Fetches the OpenGraph meta artwork directly from the drop page."""
     try:
         html_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -54,7 +55,6 @@ def fetch_artwork_from_page(target_url):
         }
         res = requests.get(target_url, headers=html_headers, timeout=5)
         if res.status_code == 200:
-            # 1. Match OpenGraph image: <meta property="og:image" content="...">
             og_match = re.search(r'<meta\s+property=[\'"]og:image[\'"]\s+content=[\'"]([^\'"]+)[\'"]', res.text, re.IGNORECASE)
             if not og_match:
                 og_match = re.search(r'<meta\s+content=[\'"]([^\'"]+)[\'"]\s+property=[\'"]og:image[\'"]', res.text, re.IGNORECASE)
@@ -62,7 +62,6 @@ def fetch_artwork_from_page(target_url):
             if og_match:
                 return clean_image_url(og_match.group(1))
 
-            # 2. Match Twitter image: <meta name="twitter:image" content="...">
             tw_match = re.search(r'<meta\s+(?:name|property)=[\'"]twitter:image[\'"]\s+content=[\'"]([^\'"]+)[\'"]', res.text, re.IGNORECASE)
             if tw_match:
                 return clean_image_url(tw_match.group(1))
@@ -71,6 +70,7 @@ def fetch_artwork_from_page(target_url):
     return None
 
 def fetch_promotions():
+    """Fetches active giveaway items from amdgaming.com/promotions using JSON headers."""
     found_items = []
     try:
         res = requests.get(PROMOTIONS_URL, headers=HEADERS, timeout=10)
@@ -93,13 +93,11 @@ def fetch_promotions():
                         "image": clean_image_url(raw_img)
                     })
             
-            # Custom promotions plugin list
+            # Custom promotions plugin structure
             promos = data.get("promotions", []) or data.get("data", []) or data.get("items", [])
             for p in promos:
                 slug = p.get("slug") or p.get("id")
                 title = p.get("title") or p.get("name", "AMD Game Key")
-                
-                # Check all common image field names used by Discourse plugins
                 raw_img = (
                     p.get("image_url") or
                     p.get("banner_url") or
@@ -141,7 +139,6 @@ def fetch_promotions():
     return found_items
 
 def send_discord_alert(url, title, image_url=None):
-    # If the JSON list had no image, resolve it via the drop page's open-graph meta tag
     if not image_url:
         print(f"Image not in JSON feed, resolving artwork from {url}...")
         image_url = fetch_artwork_from_page(url)
@@ -228,17 +225,20 @@ def check_for_drops():
 
 def main():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    in_critical_window = (now_utc.hour == 15 and now_utc.minute >= 50) or (now_utc.hour == 16 and now_utc.minute <= 15)
+    
+    # Critical drop window: 15:50 UTC to 16:05 UTC (9:20 PM to 9:35 PM IST)
+    in_critical_window = (now_utc.hour == 15 and now_utc.minute >= 50) or (now_utc.hour == 16 and now_utc.minute <= 5)
 
     if in_critical_window:
-        print("🎯 ENTERING HIGH-SPEED SURVEILLANCE MODE (Polling every 10s)...")
+        print("🎯 ENTERING HIGH-SPEED SURVEILLANCE MODE (Polling every 5s)...")
         start_time = time.time()
+        # Keep loop running for 15 minutes (900 seconds)
         while time.time() - start_time < 900:
             found = check_for_drops()
             if found:
                 print("Drop triggered and processed. Exiting surveillance loop.")
                 break
-            time.sleep(10)
+            time.sleep(5)  # 5-second polling interval
     else:
         print("Standard single scheduled pass.")
         check_for_drops()
