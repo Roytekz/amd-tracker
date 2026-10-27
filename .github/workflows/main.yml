@@ -5,9 +5,9 @@ on:
     # 1. Base routine: Runs every 15 minutes across the day
     - cron: '*/15 * * * *'
     
-    # 2. DROP WINDOW LAUNCH: Triggers at 3:54 PM UTC (9:24 PM IST)
-    # This single trigger will run continuously until 9:35 PM IST
-    - cron: '54 15 * * *'
+    # 2. DROP WINDOW LAUNCH: Triggers at 3:50 PM UTC (9:20 PM IST)
+    # Starts early to absorb GitHub runner queue delays and cover the 9:27-9:30 PM drop
+    - cron: '50 15 * * *'
 
   workflow_dispatch:
 
